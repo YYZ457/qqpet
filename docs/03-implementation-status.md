@@ -6,7 +6,14 @@ This skeleton is a source framework, not a finished agent.
 
 ```text
 event store and immutable event identities
-recent-context projection
+recent-context projection as a session board
+  (current chat in full + every other live chat with unread / waiting / preview)
+subject lock: chat turns, task wakes, memory updates and maintenance commit one at a time
+stale-commit replay on fresh state; dropped state changes reported back as hostNotices
+shared rhythm / daily budget across all chats
+burst coalescing: consecutive unread messages in one chat are read and answered in one turn
+configurable capacities (app/src/limits.mjs) with automatic shrink on input overflow
+node:test suite (npm test) and packet dump tool (npm run dump-packet)
 memory opportunity and memory window
 task store, steps, checkpoints, terminal transitions
 scheduler / task wake
@@ -21,13 +28,15 @@ UI and launch scripts
 
 ```text
 main cognition
-  Currently the code uses a bounded recent-context projection.
-  A separate filtered main-cognition layer is still a design target.
+  Currently the code uses the session board (recent-context-v2): the current chat in
+  full plus a session list of all other live chats. It is a structured view, not yet
+  a separately filtered main-cognition layer.
 
 memory window
   Includes received messages, responses, and terminal actions.
   Coverage advances only after a note is actually created.
-  A window is capped at 40 displayed items and reports omitted items.
+  A window is capped at THREADLINE_MEMORY_WINDOW_ITEMS (default 40) displayed items
+  and reports omitted items.
 
 attention threads
   The design is specified, but the 8-thread workbench and LRU suspension
@@ -35,6 +44,7 @@ attention threads
 
 office worker
   Logical workspace and command allowlist, not an OS-level sandbox.
+  Command execution tools are off unless THREADLINE_OFFICE_EXEC=1.
 
 plugins
   Manifest validation and a separate child process, not a hard sandbox.
