@@ -18,6 +18,8 @@ export class SceneScheduler {
     return pending[0].key;
   }
   shift(key){const scene=this.#scenes.get(key);ensure(scene&&scene.queue.length,'SCHEDULER','unknown or empty scene');const item=scene.queue.shift();if(!scene.queue.length)this.#scenes.delete(key);return item;}
+  // 从某个队列里取出所有满足条件的项（保持顺序），用于合并同一聊天的连发消息
+  take(key,predicate){const scene=this.#scenes.get(key);if(!scene)return [];const taken=[],kept=[];for(const item of scene.queue)(predicate(item)?taken:kept).push(item);scene.queue=kept;if(!kept.length)this.#scenes.delete(key);return taken;}
   complete(key){ensure(this.#active===key,'SCHEDULER','only the active scene can complete');this.#active=null;}
   snapshot(){return {active:this.#active,scenes:[...this.#scenes.values()].map(s=>({key:s.key,firstAt:s.firstAt,queue:[...s.queue]}))};}
   restore(snapshot){

@@ -39,15 +39,18 @@ async function start({open=true}={}){
   if(!existsSync(join(data,'memory.sqlite'))){console.error(`找不到记忆库：${join(data,'memory.sqlite')}\n请确认 data 文件夹和 app 文件夹在同一层。`);process.exit(2);}
   prepareData();
   const officeToken=process.env.OFFICE_WORKER_TOKEN??randomUUID();
+  // brain 服务以前没有令牌：本机任何进程都能操控她。现在每次启动生成一个，传给 UI、连接器和看门狗。
+  const brainToken=process.env.BRAIN_TOKEN??randomUUID();
   const officeUrl=`http://127.0.0.1:${OFFICE_PORT}`;
   const env={
     AGENT_DATA:data,BRAIN_LIVE:process.env.BRAIN_LIVE??'0',BRAIN_GLOBAL:'1',BRAIN_HEARTBEAT_MS:process.env.BRAIN_HEARTBEAT_MS??'5000',
     BRAIN_STORE:join(data,'memory.sqlite'),BRAIN_IDENTITY_FILE:join(data,'identity.txt'),BRAIN_STYLE_DIR:join(data,'style'),
     BRAIN_STATE:join(data,'state'),BRAIN_LEDGER:join(data,'budget.json'),QQ_STICKERS_FILE:join(data,'stickers.json'),...(process.env.QQ_OWNER?{QQ_OWNER:process.env.QQ_OWNER}:{}),
     OFFICE_WORKER_PORT:String(OFFICE_PORT),OFFICE_WORKER_TOKEN:officeToken,
-    OFFICE_WORKER_URL:officeUrl,
+    OFFICE_WORKER_URL:officeUrl,BRAIN_TOKEN:brainToken,
   };
   writeFileSync(join(ops,'office.token'),officeToken,{encoding:'utf8',mode:0o600});
+  writeFileSync(join(ops,'brain.token'),brainToken,{encoding:'utf8',mode:0o600});
   writeFileSync(join(ops,'office.url'),officeUrl,{encoding:'utf8'});
   log('启动智能体…');
   Object.assign(process.env,env);

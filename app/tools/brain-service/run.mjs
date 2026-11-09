@@ -6,6 +6,9 @@ import {executeTool} from '../qq-connect/tools.mjs';
 import {studyKey} from '../../src/model-key.mjs';
 import {existsSync,mkdirSync,readFileSync,renameSync,unlinkSync,writeFileSync} from 'node:fs';
 import {resolve} from 'node:path';
+import {resolveLimits} from '../../src/limits.mjs';
+
+const limits=resolveLimits();
 
 const port=Number(process.env.BRAIN_PORT??8787);
 const token=process.env.BRAIN_TOKEN??null;
@@ -38,10 +41,10 @@ if(live){
 let model=null,decide=undefined;
 try{
   if(live){
-    model=createModelDecision({ledgerPath,getKey:studyKey,profile:{dailyMicros:10_000_000,dailyCalls:300,maxTokens:3000,reasoning:'low'}});
+    model=createModelDecision({ledgerPath,getKey:studyKey,profile:{dailyMicros:10_000_000,dailyCalls:limits.dailyCalls,maxTokens:3000,reasoning:'low'}});
     decide=model.decide;
   }
-  const service=await startBrainService({port,token,storePath,taskStorePath:resolve(process.env.BRAIN_TASKS??'../data/tasks.sqlite'),stateDirectory,styleDirectory,heartbeatMs,decide,identity,rhythm:{dailyCallCap:300},extraStatus:()=>({mode:model?'live':'dry-run',budget:model?.state?.()??null}),vision:model?.vision??null,adapter:{act:({tool,args,action,taskId})=>executeTool(tool,args,{actionId:action?.id,taskId}),send:async({scene,text,utterances})=>{
+  const service=await startBrainService({port,token,storePath,taskStorePath:resolve(process.env.BRAIN_TASKS??'../data/tasks.sqlite'),stateDirectory,styleDirectory,heartbeatMs,decide,identity,rhythm:{dailyCallCap:limits.dailyCalls},limits,extraStatus:()=>({mode:model?'live':'dry-run',budget:model?.state?.()??null}),vision:model?.vision??null,adapter:{act:({tool,args,action,taskId})=>executeTool(tool,args,{actionId:action?.id,taskId}),send:async({scene,text,utterances})=>{
     if(scene?.startsWith('local/'))return {delivered:true,local:true};
     const parts=Array.isArray(utterances)&&utterances.length?utterances:[{text,delayMs:0}];
     const target=scene?.startsWith('qq/private/')?{kind:'private',id:scene.slice('qq/private/'.length)}:scene?.startsWith('qq/group/')?{kind:'group',id:scene.slice('qq/group/'.length)}:null;
@@ -57,7 +60,10 @@ try{
   let maintenanceHeartbeat=null;
   if(model){
     const maintenance=new MaintenanceSession({store:service.store,subjectId:'agent',identity});
-    maintenanceHeartbeat=startMaintenanceHeartbeat({session:maintenance,isBusy:()=>{const h=service.health();return h.active!==null||(h.pending?.length??0)>0;},invoke:model.invokeMaintenance,
+    // 后台维护也会改她的状态：和聊天回合走同一把锁，否则两边并发时总有一边的修改作废。
+    const rawTick=maintenance.tick.bind(maintenance);
+    maintenance.tick=options=>service.withSubjectLock('maintenance',()=>rawTick(options));
+    maintenanceHeartbeat=startMaintenanceHeartbeat({session:maintenance,isBusy:()=>{const h=service.health();return h.active!==null||h.mind!==null||(h.pending?.length??0)>0;},invoke:model.invokeMaintenance,
       authorize:async()=>true,onResult:r=>console.error('[maintenance]',r.status??'unknown'),onError:e=>console.error('[maintenance]',e.message)});
   }
   console.log(JSON.stringify({url:service.url,port:service.port,mode:model?'live':'dry-run',storePath,stateDirectory,heartbeatMs,identityFile,identityChars:identity.length,maintenance:!!maintenanceHeartbeat}));

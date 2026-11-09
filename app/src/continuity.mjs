@@ -20,7 +20,7 @@ export function readPersonalState({store,subjectId,state,detail=true}) {
   ensure(value?.type==='personal_state'&&value.subject===subjectId,'MISSING_STATE','unknown own state');
   return stateCard(value,{historical:store.read(value.id).revision!==value.revision,detail});
 }
-export function continuityInput({store,subjectId,stateRefs=[],detail=false,currentEvent=null,mind=false,workbenchFocus=false,focusProcessIds=[],tasks=[]}) {
+export function continuityInput({store,subjectId,stateRefs=[],detail=false,currentEvent=null,mind=false,workbenchFocus=false,focusProcessIds=[],tasks=[],recent:recentOptions=null}) {
   text(subjectId,'subject id');ensure(typeof detail==='boolean','INVALID_INPUT','detail must be boolean');
   return store.view(()=>{
     const subject=store.read(subjectId);ensure(subject?.type==='subject','MISSING_SUBJECT','initialize the subject first');
@@ -64,7 +64,8 @@ export function continuityInput({store,subjectId,stateRefs=[],detail=false,curre
     }
     const activities=activityDirectory([...store.all('personal_state')].filter(r=>r.subject===subjectId),[...selectedActivityIds]);
     const anchors=anchorView({store,subjectId,currentEvent:currentRecord,limit:12});
-    const recent=recentContext({store,subjectId,currentEvent:currentRecord,limit:50});
+    // 规模来自 limits（由 turn-driver 传入，超预算时会自动缩小）；按当前频道分组，别的频道只给摘要。
+    const recent=recentContext({store,subjectId,currentEvent:currentRecord,scene:currentRecord?.scene??null,...(recentOptions??{})});
     return {subject:ref(subject),maxForeground:subject.maxForeground,foreground,recalled,
       lastReaction,pendingObservations:store.subjectInbox({subjectId,limit:16}),detail,...(activities.length?{activities}:{}),...(tasks.length?{tasks}:{}),...(stream?{stream}:{}),...(view?{attention:view.metadata}:{}),...(projection?{mind:projection}:{}),...(anchors.records.length?{anchors}:{}),...(recent?{recent}:{}),
       // 版本栅栏：只有新投影携带自述/记忆协议；历史打包没有该字段，字节保持不变，可原样复核。

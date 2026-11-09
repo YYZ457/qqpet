@@ -3,7 +3,9 @@ import {readFileSync} from 'node:fs';
 import {resolve} from 'node:path';
 import {StyleStore} from '../../src/style-store.mjs';
 
-const source=process.env.OLD_SOCIAL??resolve('..','整理版_2026-10-16','qq-bridge','state','social-v2.json');
+// 来源是使用者自己导出的聊天记录（social-v2.json 格式），不再默认指向作者本机的目录。
+const source=process.env.OLD_SOCIAL?resolve(process.env.OLD_SOCIAL):null;
+if(!source){console.error('usage: OLD_SOCIAL=path/to/social-v2.json node tools/style/build-style.mjs');process.exit(2);}
 const data=JSON.parse(readFileSync(source,'utf8'));
 const texts=[];
 for(const conv of Object.values(data.conversations??{})){

@@ -7,7 +7,9 @@ const here=fileURLToPath(new URL('.',import.meta.url));
 const dataDir=process.env.NECKLACE_DIR??resolve(here,'../../../_local/necklace');
 const file=resolve(dataDir,'necklace.json');
 const memory={enabled:false,store:{data:{self:{entries:[]}}}};
-const necklace=new Necklace({file,ownerKey:'private:3482479936',memory,experiences:{},journal:{},canReadMemory:()=>false});
+// 主人身份来自配置（QQ_OWNER 或 NECKLACE_OWNER_KEY），不再写死在代码里。
+const ownerKey=process.env.NECKLACE_OWNER_KEY??(process.env.QQ_OWNER?`private:${process.env.QQ_OWNER}`:'private:owner');
+const necklace=new Necklace({file,ownerKey,memory,experiences:{},journal:{},canReadMemory:()=>false});
 
 export async function runNecklace(input={}){
   return necklace.request({...input,action:input.action??'status'},{actor:'agent'});

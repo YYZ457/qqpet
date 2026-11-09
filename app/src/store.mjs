@@ -559,7 +559,15 @@ export class ContinuityStore {
     const maxForeground=c.maxForeground??8;
     ensure(Number.isSafeInteger(maxForeground)&&maxForeground>0&&maxForeground<=32,'STATE_LIMIT','foreground capacity must be 1..32');
     const old=this.#read(c.id);
-    if(old){ensure(old.type==='subject'&&old.maxForeground===maxForeground,'SUBJECT_EXISTS','cannot reset an existing subject or its capacity');return old;}
+    if(old){
+      ensure(old.type==='subject','SUBJECT_EXISTS','cannot reset an existing subject');
+      if(old.maxForeground===maxForeground)return old;
+      // 容量以前在建库时写死，之后改配置会直接启动失败。现在允许调整：
+      // 扩容随时可以；缩容时如果当前前台放不下，拒绝并说明，由她或使用者先把状态放回后台。
+      ensure(old.foreground.length<=maxForeground,'FOREGROUND_CAPACITY',`foreground holds ${old.foreground.length} states; cannot shrink capacity to ${maxForeground}`);
+      const {id,type,revision,...fields}=old;
+      return this.#write(c.id,'subject',revision,{...fields,maxForeground,recordedAt:this.#now()});
+    }
     return this.#write(c.id,'subject',0,{foreground:[],changedStates:[],maxForeground,lastDecision:null,recordedAt:this.#now()});
   }
   #admitSubjectEvent(c) {
@@ -572,7 +580,8 @@ export class ContinuityStore {
   #retireSubjectEvents(c){
     const subject=this.#read(c.subjectId);ensure(subject?.type==='subject','MISSING_SUBJECT','subject required');
     const ids=Array.isArray(c.eventIds)?c.eventIds:[];
-    for(const id of ids)this.#db.prepare("UPDATE subject_inbox SET status='handled',updated_at=? WHERE subject_id=? AND event_id=?").run(this.#now(),c.subjectId,id);
+    const decisionId=c.decision?.id??null;
+    for(const id of ids)this.#db.prepare("UPDATE subject_inbox SET status='handled',decision_id=COALESCE(?,decision_id),updated_at=? WHERE subject_id=? AND event_id=?").run(decisionId,this.#now(),c.subjectId,id);
     return {retired:ids.length};
   }
   #releaseCompletedWorkbench(c){    text(c.subjectId,'subject id');

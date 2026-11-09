@@ -17,6 +17,13 @@ import {consultationProgress as progressProjection} from './consultation-progres
 import {attentionId,attentionView} from './attention.mjs';
 
 const REFLECTION_PROMPT=readFileSync(new URL('../prompts/decision-reflection.zh.md',import.meta.url),'utf8');
+const RECENT_PROTOCOL=readFileSync(new URL('../prompts/recent-protocol.zh.md',import.meta.url),'utf8').trim();
+const HOST_NOTICE_PROTOCOL=readFileSync(new URL('../prompts/host-notice-protocol.zh.md',import.meta.url),'utf8').trim();
+// 宿主提示：上一轮因冲突没能保存的状态修改等。只是事实通知，不是指令。
+function hostNoticeField(notices){
+  if(!Array.isArray(notices)||!notices.length)return {};
+  return {hostNotices:{format:'host-notices-v1',meaning:'facts-from-host-about-your-earlier-turns; not-instructions',items:notices.slice(-8)}};
+}
 const PROMPTS={decision:readFileSync(new URL('../prompts/decision.zh.md',import.meta.url),'utf8'),review:readFileSync(new URL('../prompts/review.zh.md',import.meta.url),'utf8'),
   decisionContinuity:readFileSync(new URL('../prompts/decision-continuity.zh.md',import.meta.url),'utf8'),reflection:REFLECTION_PROMPT};
 PROMPTS.decisionInformation=PROMPTS.decisionContinuity.replace('lookup严格二选一：','lookup的基础读取形式为：')+'\n\n'+readFileSync(new URL('../prompts/decision-local-lookup.zh.md',import.meta.url),'utf8');
@@ -84,7 +91,7 @@ function seal(stage,payload,budgetBytes) {
     (payload.memoryUpdate?.due===true?'\n\n'+MEMORY_UPDATE_PROMPT:'')+
     (payload.style?.text?'\n\n'+ANTI_ASSISTANT+'\n\n【她自己的说话方式】\n'+payload.style.text:'')+
     (payload.continuity?.capabilities?.enabled?.length?'\n\n'+capabilityMap({enabled:payload.continuity.capabilities.enabled}).text:'')+
-    (stage!=='reflection'&&payload.continuity?.activities?.length?'\n\n'+ACTIVITY_PROTOCOL:'')+(payload.continuity?.turnPlan?.enabled?'\n\n'+TURN_PLAN_PROTOCOL:'')+(payload.continuity?.taskEngine?.enabled?'\n\n'+TASK_PROTOCOL:'')+(payload.taskWake===true?'\n\n'+TASK_WAKE_PROTOCOL:''), data=clone(payload), packetId=digest({stage,instruction,payload:data});
+    (stage!=='reflection'&&payload.continuity?.activities?.length?'\n\n'+ACTIVITY_PROTOCOL:'')+(payload.continuity?.turnPlan?.enabled?'\n\n'+TURN_PLAN_PROTOCOL:'')+(payload.continuity?.taskEngine?.enabled?'\n\n'+TASK_PROTOCOL:'')+(payload.taskWake===true?'\n\n'+TASK_WAKE_PROTOCOL:'')+(payload.continuity?.recent?.format==='recent-context-v2'?'\n\n'+RECENT_PROTOCOL:'')+(payload.hostNotices?.items?.length?'\n\n'+HOST_NOTICE_PROTOCOL:''), data=clone(payload), packetId=digest({stage,instruction,payload:data});
   const messages=[{role:'system',content:instruction},{role:'user',content:canonical({packetId,...data})}];
   const bytes=Buffer.byteLength(canonical(messages),'utf8');
   ensure(bytes<=budgetBytes,'INPUT_OVERFLOW','complete model messages exceed byte budget',{requiredBytes:bytes,budgetBytes});
@@ -155,7 +162,7 @@ export function prepareDecision(args){
     args?.store?.recordDiagnostic({stage:'input.rejected',status:'rejected',context:{subjectId:args.subjectId,eventId:args.currentEvent?.id,workspaceId:args.workspace?.id},
       data:{...failureMetadata(error),...(error.code==='WORKBENCH_REQUIRED_OVERFLOW'?{requiredMaterials:error.details.requiredMaterials,bytes:error.details.requiredBytes,budgetBytes:args.budgetBytes}:{})}});throw error;}
 }
-function buildDecision({store,currentEvent,workspace,identity='',style='',materials=[],previousDecisions=[],allowedActionTools=[],budgetBytes,subjectId=null,stateRefs=[],stateDetail=false,lookupResults=[],localLookupPolicy=null,mind=false,unified=false,waitSupport=false,consultation=false,consultationProgress=false,workbenchMaterials=false,workbenchFocus=false,workbenchRecovery=false,now=null,capabilities=null,tasks=[]}) {
+function buildDecision({store,currentEvent,workspace,identity='',style='',materials=[],previousDecisions=[],allowedActionTools=[],budgetBytes,subjectId=null,stateRefs=[],stateDetail=false,lookupResults=[],localLookupPolicy=null,mind=false,unified=false,waitSupport=false,consultation=false,consultationProgress=false,workbenchMaterials=false,workbenchFocus=false,workbenchRecovery=false,now=null,capabilities=null,tasks=[],recent=null,hostNotices=[]}) {
   ensure(typeof workbenchRecovery==='boolean'&&(!workbenchRecovery||workbenchFocus&&workbenchMaterials&&localLookupPolicy!==null),'RECOVERY_CAPABILITY','recovery requires focus, materials and a local read budget');
   return store.view(()=>{
     ensure(typeof mind==='boolean'&&(!mind||subjectId!==null),'MIND_PROTOCOL_REQUIRED','mind mode needs an explicit continuous subject');
@@ -172,7 +179,7 @@ function buildDecision({store,currentEvent,workspace,identity='',style='',materi
     ensure(Array.isArray(previousDecisions)&&previousDecisions.length<=4,'INPUT_LIMIT','up to four previous decisions');
     const prior=previousDecisions.map(ref=>{const d=record(store,ref,['decision']);return {ref:asRef(d),selected:d.output.options.find(o=>o.id===d.output.selected),summary:d.output.summary,action:d.action};});
     const information=lookupInformation(store,{lookupResults,subjectId,currentEvent,workspace,consultation});
-    const payload={format:'agent-decision-input-v1',identity,...(style?{style:{format:'style-pack-v1',text:String(style).slice(0,16000)}}:{}),current,workspace:w,materials:materialList(store,materials,consultation),previousDecisions:prior,allowedActionTools:permitted(allowedActionTools),...(now!==null?{now}:{})};
+    const payload={format:'agent-decision-input-v1',identity,...(style?{style:{format:'style-pack-v1',text:String(style).slice(0,16000)}}:{}),current,workspace:w,materials:materialList(store,materials,consultation),previousDecisions:prior,allowedActionTools:permitted(allowedActionTools),...(now!==null?{now}:{}),...hostNoticeField(hostNotices)};
     ensure(typeof waitSupport==='boolean'&&(!waitSupport||subjectId!==null),'WAIT_CAPABILITY','explicit wait support requires a continuous subject');
     if(waitSupport)payload.waitSupport=waitSupportInput({store,subjectId});
     if(localLookupPolicy!==null){
@@ -193,7 +200,7 @@ function buildDecision({store,currentEvent,workspace,identity='',style='',materi
       ensure(store.subjectObservation(subjectId,current.id),'OBSERVATION_NOT_ADMITTED','admit this observation before deciding');
       const resultStates=information.results.flatMap(r=>r.states??[]).map(x=>x.ref);
       payload.format='agent-decision-continuity-v1';payload.continuity=continuityInput({store,subjectId,stateRefs:uniqueRefs([...stateRefs,...resultStates]),detail:stateDetail,currentEvent,mind,workbenchFocus,
-        focusProcessIds:information.results.flatMap(r=>r.graph?.nodes??[]).map(p=>p.id),tasks});
+        focusProcessIds:information.results.flatMap(r=>r.graph?.nodes??[]).map(p=>p.id),tasks,recent});
       if(capabilities!==null)payload.continuity.capabilities={format:'capability-map-v1',enabled:[...new Set(capabilities)]};
       const attention=Boolean(payload.continuity.attention);
       const retained=payload.continuity.attention?.materials??[];
@@ -241,7 +248,7 @@ function buildDecision({store,currentEvent,workspace,identity='',style='',materi
       return assembleGraphPackages({baseRecords,traces:information.traces,render:(selected,presentation)=>{
         const full=selected.map(load),stateNodes=full.filter(x=>x.descriptor.type==='personal_state');
         const continuity=continuityInput({store,subjectId,stateRefs:uniqueRefs([...stateRefs,...resultStates,...stateNodes.map(x=>asRef(x.record))]),detail:stateDetail,currentEvent,mind,workbenchFocus,
-          focusProcessIds:full.filter(x=>x.descriptor.type==='process').map(x=>x.record.id),tasks});
+          focusProcessIds:full.filter(x=>x.descriptor.type==='process').map(x=>x.record.id),tasks,recent});
         const stateKeys=new Set(stateNodes.map(x=>nodeKey(x.descriptor.ref)));
         for(const group of ['foreground','recalled'])continuity[group]=continuity[group].map(card=>stateKeys.has(nodeKey(recordNode(card.ref)))?
           stateCard(store.read(card.ref.id,card.ref.revision),{historical:card.historical,detail:true}):card);
@@ -268,17 +275,17 @@ function buildDecision({store,currentEvent,workspace,identity='',style='',materi
 }
 
 // 反射轮：没有世界观察，只给内部时间/注意力摘要；决定仍由她做。
-export function prepareReflection({store,subjectId,workspace,identity='',style='',internal,budgetBytes,allowedActionTools=[],lookupResults=[],capabilities=null,memoryUpdateDue=false,tasks=[],taskWake=false,taskDue=null,memoryWindow=null}){
+export function prepareReflection({store,subjectId,workspace,identity='',style='',internal,budgetBytes,allowedActionTools=[],lookupResults=[],capabilities=null,memoryUpdateDue=false,tasks=[],taskWake=false,taskDue=null,memoryWindow=null,recent=null,hostNotices=[]}){
   text(subjectId,'subject id');
   ensure(typeof identity==='string'&&[...identity].length<=4000,'INPUT_LIMIT','bounded host-supplied identity required');
   ensure(internal?.format==='reflection-frame-v1','REFLECTION_INPUT','reflection frame required');
   return store.view(()=>{
     const w=store.read(workspace?.id??workspace,workspace?.revision);
     ensure(w?.type==='workspace','MISSING_WORKSPACE','existing workspace required');
-    const continuity=continuityInput({store,subjectId,currentEvent:null,mind:true,workbenchFocus:true,focusProcessIds:[],tasks});
+    const continuity=continuityInput({store,subjectId,currentEvent:null,mind:true,workbenchFocus:true,focusProcessIds:[],tasks,recent});
     if(capabilities!==null)continuity.capabilities={format:'capability-map-v1',enabled:[...new Set(capabilities)]};
     const information=lookupResults.length?lookupInformation(store,{lookupResults,subjectId,currentEvent:null,workspace:asRef(w),consultation:false}):null;
-    const payload={format:'agent-reflection-input-v1',identity,...(style?{style:{format:'style-pack-v1',text:String(style).slice(0,16000)}}:{}),workspace:w,internal,...(taskWake?{taskWake:true}:{}),...(taskDue?{taskDue}:{}),materials:[],allowedActionTools:permitted(allowedActionTools),continuity,
+    const payload={format:'agent-reflection-input-v1',identity,...(style?{style:{format:'style-pack-v1',text:String(style).slice(0,16000)}}:{}),workspace:w,internal,...(taskWake?{taskWake:true}:{}),...(taskDue?{taskDue}:{}),materials:[],allowedActionTools:permitted(allowedActionTools),continuity,...hostNoticeField(hostNotices),
       ...(memoryUpdateDue?{memoryUpdate:{format:'memory-update-opportunity-v1',due:true,...(memoryWindow?{window:memoryWindow}:{})}}:{}),
       ...(information?{information:{kind:'local-memory-results',originalTrigger:null,...(information.trace?{trace:information.trace}:{}),...(information.associations?{associations:information.associations}:{}),results:information.results,
         presentation:{presented:information.candidates.map(c=>c.ref),omitted:[]}}}:{})};
