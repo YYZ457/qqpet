@@ -21,6 +21,8 @@ import {claimResponse,recordResponseDelivery} from '../../src/continuity.mjs';
 import {StyleStore} from '../../src/style-store.mjs';
 import {TaskStore} from '../../src/tasks.mjs';
 import {buildMemoryWindow} from '../../src/memory-window.mjs';
+import {SubjectLock} from '../../src/subject-lock.mjs';
+import {resolveLimits} from '../../src/limits.mjs';
 
 const MAX_BODY=1024*1024;
 const MAX_VISION_BODY=12*1024*1024;
@@ -69,11 +71,16 @@ function firstText(messages){
   return last?.content??'';
 }
 
-export function createBrainService({storePath=':memory:',subjectId='agent',identity='你是智能体。',decide=dryDecide,rhythm={},clock=Date.now,capabilities=CAPABILITIES.map(c=>c.id),allowedActionTools=[...TOOL_NAMES,'remember_note'],adapter=null,stateDirectory=null,styleDirectory=null,heartbeatMs=0,global=false,eventBypass=true,keyFile=null,extraStatus=null,vision=null,taskStorePath=null,taskStore=null,taskTickMs=5000}={}){
+export function createBrainService({storePath=':memory:',subjectId='agent',identity='你是智能体。',decide=dryDecide,rhythm={},clock=Date.now,capabilities=CAPABILITIES.map(c=>c.id),allowedActionTools=[...TOOL_NAMES,'remember_note'],adapter=null,stateDirectory=null,styleDirectory=null,heartbeatMs=0,global=false,eventBypass=true,keyFile=null,extraStatus=null,vision=null,taskStorePath=null,taskStore=null,taskTickMs=5000,limits=null}={}){
+  const L=resolveLimits(limits??{});
+  // 一个主体一把锁：聊天回合、任务唤醒、记忆整理、后台维护都在锁里调用模型和提交，彼此不再互相覆盖。
+  const lock=new SubjectLock();
+  // 所有会话的 driver 共享节律/预算与宿主提示（她是同一个人）。
+  const shared={};
   ensure(typeof storePath==='string'&&storePath.length>0,'BRAIN_SERVICE','store path required');
   const store=new ContinuityStore(storePath);
   const tasks=taskStore??new TaskStore(taskStorePath??':memory:');
-  new ContinuitySession({store,subjectId,attention:true,maxForeground:16});
+  new ContinuitySession({store,subjectId,attention:true,maxForeground:L.foreground});
   const scheduler=new SceneScheduler({clock});
   const drivers=new Map();
   let globalDriver=null;
@@ -85,12 +92,12 @@ export function createBrainService({storePath=':memory:',subjectId='agent',ident
     if(global){
       if(globalDriver)return globalDriver;
       const workspace=ensureWorkspace(store,'global');
-      globalDriver=new TurnDriver({store,subjectId,workspace:{id:workspace.id,revision:workspace.revision},identity,style:styles.text(),eventBypass,decide,rhythm,capabilities,allowedActionTools,tasks:()=>tasks.summary({subject:subjectId})});
+      globalDriver=new TurnDriver({store,subjectId,workspace:{id:workspace.id,revision:workspace.revision},identity,style:styles.text(),eventBypass,decide,rhythm,capabilities,allowedActionTools,tasks:()=>tasks.summary({subject:subjectId}),shared,limits:L});
       globalDriver.loadState();return globalDriver;
     }
     if(drivers.has(scene))return drivers.get(scene);
     const workspace=ensureWorkspace(store,scene);
-    const driver=new TurnDriver({store,subjectId,workspace:{id:workspace.id,revision:workspace.revision},identity,style:styles.text(),eventBypass,decide,rhythm,capabilities,allowedActionTools,tasks:()=>tasks.summary({subject:subjectId})});
+    const driver=new TurnDriver({store,subjectId,workspace:{id:workspace.id,revision:workspace.revision},identity,style:styles.text(),eventBypass,decide,rhythm,capabilities,allowedActionTools,tasks:()=>tasks.summary({subject:subjectId}),shared,limits:L});
     driver.loadState();
     drivers.set(scene,driver);return driver;
   };
@@ -251,20 +258,35 @@ export function createBrainService({storePath=':memory:',subjectId='agent',ident
       return {...candidate,eventId};
     }
   }
+  function gatherBurst(queueKey,scene,max){
+    if(max<=0)return [];
+    let count=0;
+    return scheduler.take(queueKey,candidate=>{
+      if(count>=max||(candidate.scene??queueKey)!==scene)return false;
+      const eventId=eventIdOf(candidate),obs=store.subjectObservation(subjectId,eventId),event=store.read(eventId);
+      if(obs?.status!=='received'||!['observed','reported'].includes(event?.origin))return false;
+      count++;return true;
+    }).map(c=>({...c,eventId:eventIdOf(c)}));
+  }
   async function turn({preferred=null,deliver=false,execute=false}={}){
     const queueKey=scheduler.next({preferred:global?null:preferred});
     if(queueKey===null)return {ok:true,busy:true,pending:scheduler.pending()};
     scheduler.activate(queueKey);
     try{
-      const item=takeNext(queueKey);
-      if(!item){saveState();return {ok:true,busy:true,empty:true,pending:scheduler.pending()};}
-      const scene=item.scene??queueKey;
+      const first=takeNext(queueKey);
+      if(!first){saveState();return {ok:true,busy:true,empty:true,pending:scheduler.pending()};}
+      const scene=first.scene??queueKey;
+      // 连发合并：同一个聊天里排着的其他未读一起取出，以最新一条为 current；
+      // 前面几条在会话面板的 here 里标 unread，她一次读完再回，而不是一条一条各回一次。
+      const burst=[first,...gatherBurst(queueKey,scene,L.burstMax-1)];
+      const item=burst.at(-1),absorbed=burst.slice(0,-1);
+      const requeue=()=>{for(const x of [...burst].reverse())scheduler.unshift(queueKey,x);};
       const driver=driverFor(global?'global':scene);
       let result;
-      try{result=await driver.tick({now:clock(),eventId:item.eventId});}
+      try{result=await lock.run(`turn:${scene}`,()=>driver.tick({now:clock(),eventId:item.eventId}));}
       catch(error){
         console.error('[turn-error]', item.eventId, error.message, JSON.stringify(error.details??{}), error.stack??error);
-        scheduler.unshift(queueKey,item);driver.persistState();saveState();
+        requeue();driver.persistState();saveState();
         const code=error.code??'TURN_ERROR';
         lastError={code,message:error.message,at:clock(),eventId:item.eventId};
         blockedUntil=clock()+(HARD_ERRORS.has(code)?60_000:8_000);
@@ -272,10 +294,13 @@ export function createBrainService({storePath=':memory:',subjectId='agent',ident
       }
       if(result?.stale){saveState();return {ok:true,busy:true,empty:true,pending:scheduler.pending()};}
       if(!result?.decision&&(result?.wake===false||result?.action==='budget-blocked')){
-        scheduler.unshift(queueKey,item);
+        requeue();
         driver.persistState();saveState();
         return {ok:true,busy:true,deferred:true,result,pending:scheduler.pending()};
       }
+      if(absorbed.length&&result.decision&&store.subjectObservation(subjectId,item.eventId)?.status==='handled')
+        store.execute({requestId:'burst:'+randomUUID(),commands:[{op:'retire_subject_events',subjectId,eventIds:absorbed.map(x=>x.eventId),decision:result.decision}]});
+      else if(absorbed.length)for(const x of [...absorbed].reverse())scheduler.unshift(queueKey,x);
       try{store.execute({requestId:'release:'+randomUUID(),commands:[{op:'release_completed_workbench',subjectId}]});}catch{}
       const outbox=driver.takeOutbox();
       let targetScene=scene;
@@ -285,7 +310,7 @@ export function createBrainService({storePath=':memory:',subjectId='agent',ident
       for(const o of outbox)o.scene=targetScene;
       driver.persistState();saveState();
       const delivery=deliver?await dispatch(outbox,{scene:targetScene,execute}):null;
-      return {ok:true,scene:targetScene,item:item.key??null,eventId:item.eventId,result,outbox,delivery,silent:!outbox.some(o=>o.kind==='respond'),pending:scheduler.pending()};
+      return {ok:true,scene:targetScene,item:item.key??null,eventId:item.eventId,absorbed:absorbed.map(x=>x.eventId),result,outbox,delivery,silent:!outbox.some(o=>o.kind==='respond'),pending:scheduler.pending()};
     }finally{scheduler.complete(queueKey);}
   }
   async function reply(input){
@@ -364,20 +389,26 @@ export function createBrainService({storePath=':memory:',subjectId='agent',ident
     items.sort((a,b)=>(a.at??0)-(b.at??0));
     return {ok:true,items:items.slice(-limit)};
   }
-  const lastTaskWake=new Map();
+  const lastTaskWake=new Map(),taskRetryAt=new Map();
   let taskTimer=null;
   async function sweepTasks(){
     try{
-      if(health().active!==null||scheduler.pending().length>0)return;
+      if(health().active!==null||lock.busy()||scheduler.pending().length>0)return;
       const due=tasks.open({subject:subjectId,limit:8}).filter(t=>Number.isFinite(t.nextWakeAt)&&t.nextWakeAt<=clock());
       for(const task of due){
         if(lastTaskWake.get(task.id)>=task.nextWakeAt)continue;
+        if((taskRetryAt.get(task.id)??0)>clock())continue;
         if(tasks.wokenBefore({id:task.id,wakeAt:task.nextWakeAt}))continue;
-        lastTaskWake.set(task.id,task.nextWakeAt);
-        try{tasks.markWoken({id:task.id,wakeAt:task.nextWakeAt});}catch{}
         const driver=global?globalDriver:driverFor(task.scene??'global');
         if(!driver)continue;
-        const result=await driver.taskWake({now:clock(),task});
+        lastTaskWake.set(task.id,task.nextWakeAt);
+        let result;
+        // 以前先标记“已唤醒”再调用模型：这一轮一失败（比如和聊天并发撞车），这次唤醒就永久丢了。
+        // 现在成功后才标记；失败的一分钟后再试。
+        try{result=await lock.run(`task:${task.id}`,()=>driver.taskWake({now:clock(),task}));}
+        catch(error){lastTaskWake.delete(task.id);taskRetryAt.set(task.id,clock()+60_000);throw error;}
+        taskRetryAt.delete(task.id);
+        try{tasks.markWoken({id:task.id,wakeAt:task.nextWakeAt});}catch{}
         if(result?.outbox?.length){
           for(const item of result.outbox)if(item.action?.id)try{tasks.linkAction({taskId:task.id,actionId:item.action.id});}catch{}
           await dispatch(result.outbox,{scene:task.scene??'global',execute:true,taskRef:task.id});
@@ -419,7 +450,7 @@ export function createBrainService({storePath=':memory:',subjectId='agent',ident
     return {ok:true,keyConfigured:true};
   }
   function stats(){const counts={};for(const type of ['event','note','entity','binding','personal_state','workspace','action','decision','link'])counts[type]=[...store.all(type)].length;return {ok:true,subjectId,counts,style:styles.status(),attention:policy.status(),context:cursor};}
-  function health(){return {ok:true,...(extraStatus?{runtime:extraStatus()}:{}),mode:decide===dryDecide?'dry-run':'custom',subjectId,global,lastError,active:scheduler.active(),pending:scheduler.pending(),scenes:global?1:drivers.size,attention:policy.status()};}
+  function health(){return {ok:true,...(extraStatus?{runtime:extraStatus()}:{}),mode:decide===dryDecide?'dry-run':'custom',subjectId,global,lastError,active:scheduler.active(),mind:lock.holder(),pending:scheduler.pending(),scenes:global?1:drivers.size,attention:policy.status()};}
   function saveState(){if(!stateFile)return;try{writeFileSync(stateFile,JSON.stringify({scheduler:scheduler.snapshot()}),'utf8');}catch{}}
   function restoreState(){
     if(!stateFile||!existsSync(stateFile))return;
@@ -456,14 +487,14 @@ export function createBrainService({storePath=':memory:',subjectId='agent',ident
   function saveCursor(){if(!cursorFile)return;try{writeFileSync(cursorFile,JSON.stringify(cursor),'utf8');}catch{}}
   restoreState();
   rehydrateInbox();
-  const memoryDue=()=>cursor.memoryPending.length>0&&(cursor.memoryPending.length>=50||clock()-cursor.lastMemoryPromptAt>=2*60*60*1000);
+  const memoryDue=()=>cursor.memoryPending.length>0&&(cursor.memoryPending.length>=L.memoryDueMessages||clock()-cursor.lastMemoryPromptAt>=L.memoryDueMinutes*60*1000);
   function memoryWindow(){
-    return buildMemoryWindow({store,subjectId,lastMemoryAt:cursor.lastMemoryAt??0,messageIds:cursor.memoryPending,limit:40});
+    return buildMemoryWindow({store,subjectId,lastMemoryAt:cursor.lastMemoryAt??0,messageIds:cursor.memoryPending,limit:L.memoryWindowItems});
   }  async function idleReflect(){
-    if(!global||!memoryDue()||scheduler.active()!==null||scheduler.pending().length)return {skipped:true};
+    if(!global||!memoryDue()||scheduler.active()!==null||lock.busy()||scheduler.pending().length)return {skipped:true};
     const window=memoryWindow();
     const driver=driverFor('global');const notesBefore=[...store.all('note')].length;
-    const result=await driver.tick({now:clock(),memoryUpdate:true,memoryWindow:window});
+    const result=await lock.run('memory-update',()=>driver.tick({now:clock(),memoryUpdate:true,memoryWindow:window}));
     const outbox=driver.takeOutbox();
     // 记忆提示是内部整理，不应向任何聊天窗口发消息；只执行本地动作（例如 remember_note）。
     const acts=outbox.filter(item=>item.kind==='act');
@@ -480,7 +511,7 @@ export function createBrainService({storePath=':memory:',subjectId='agent',ident
   }
   let beating=false;
   async function beat(){
-    if(beating||scheduler.active()!==null||clock()<blockedUntil)return;
+    if(beating||scheduler.active()!==null||lock.busy()||clock()<blockedUntil)return;
     beating=true;
     try{
       // 先清待处理观察，再谈整理：否则“该整理了”会永远饿死用户消息
@@ -536,7 +567,7 @@ export function createBrainService({storePath=':memory:',subjectId='agent',ident
       return {idle:true,...result};
     }
     if(!global)return {ok:true,idle:true,skipped:'nothing-pending'};
-    const driver=driverFor('global'),result=await driver.tick({now:clock()});
+    const driver=driverFor('global'),result=await lock.run('idle',()=>driver.tick({now:clock()}));
     if(!result?.wake)return {ok:true,idle:true,result};
     const outbox=driver.takeOutbox();
     const delivery=outbox.length?await dispatch(outbox,{scene:'global',execute:true}):null;
@@ -545,7 +576,7 @@ export function createBrainService({storePath=':memory:',subjectId='agent',ident
   }
   recoverUncertainActions();
   if(taskTickMs>0){taskTimer=setInterval(()=>{void sweepTasks();},taskTickMs);taskTimer.unref?.();}
-  const service={server,observe,turn,reply,receipt,responseDelivered,health,stats,close,idleTurn,dispatch,executeAction,mute,unmute,loadBacklog,attention:()=>policy.status(),context:()=>cursor,style:()=>styles.status(),styleUpdate:(v)=>styles.update(v),styleDelete:(id)=>styles.remove(id),tick:()=>turn(),idleReflect,store,tasks,tasksApi,token:null,vision};
+  const service={server,observe,turn,reply,receipt,responseDelivered,health,stats,close,idleTurn,dispatch,executeAction,mute,unmute,loadBacklog,attention:()=>policy.status(),context:()=>cursor,style:()=>styles.status(),styleUpdate:(v)=>styles.update(v),styleDelete:(id)=>styles.remove(id),tick:()=>turn(),idleReflect,store,tasks,tasksApi,withSubjectLock:(label,fn)=>lock.run(label,fn),limits:L,notices:()=>shared.notices??[],token:null,vision};
   return service;
 }
 

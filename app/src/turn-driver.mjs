@@ -8,12 +8,38 @@ import {reflectionFrame} from './reflection-frame.mjs';
 import {rhythmConfig,rhythmTick} from './rhythm.mjs';
 import {recordEpisodes} from './tendency.mjs';
 import {observeAssociation} from './association-observe.mjs';
+import {keepAttention} from './attention.mjs';
+import {resolveLimits} from './limits.mjs';
 
 const ref=r=>({id:r.id,revision:r.revision});
+// 别的会话先提交导致的过期：可以在最新状态上重放
+const STALE_ERRORS=new Set(['STALE_SUBJECT','STALE_ATTENTION','STALE_STATE','STALE_DELIVERY']);
+// 状态增量层面的问题：可以丢掉状态增量、保留说话和动作
+const STATE_ERRORS=new Set([...STALE_ERRORS,'RESIDENCY_CONFLICT','UNDELIVERED_BASIS','UNREAD_STATE','MIND_KIND','STATE_CONFLICT','VERSION_CONFLICT',
+  'MISSING_STATE','CLOSED_FOREGROUND','FOREGROUND_CAPACITY','ID_COLLISION','MIND_PROTOCOL_REQUIRED']);
+// 真实模型客户端返回 JSON 字符串；旧的降级逻辑只认对象，所以对真模型从来没生效过。
+function parseOutput(output){
+  if(output&&typeof output==='object')return output;
+  if(typeof output!=='string')return null;
+  try{const v=JSON.parse(output);return v&&typeof v==='object'?v:null;}catch{return null;}
+}
+function droppedChanges(continuity){
+  const clip=v=>typeof v==='string'?v.slice(0,160):v;
+  return [
+    ...(continuity.changes??[]).map(c=>({op:c.expectedRevision===0?'create':'revise',id:c.id,kind:c.kind??null,body:clip(c.body??null),status:c.status??null})),
+    ...(continuity.residency?.add??[]).map(id=>({op:'foreground-add',id})),
+    ...(continuity.residency?.remove??[]).map(id=>({op:'foreground-remove',id})),
+    ...(continuity.attention?.residency?.upsert??[]).map(r=>({op:'attention-upsert',id:r.id})),
+  ].slice(0,16);
+}
 
 export class TurnDriver {
-  #store;#subjectId;#session;#lookup;#decide;#config;#lookupPolicy;#workspace;#identity;#style;#eventBypass;#materialsFor;#maxCalls;#state;#outbox;#tendency;#allowed;#capabilities;#tickChain;#tasks;
-  constructor({store,subjectId,decide,workspace,identity='',style='',eventBypass=false,materialsFor=null,rhythm={},lookupPolicy={maxReads:2,maxHits:4},maxCallsPerTurn=3,maxForeground=16,tendency=null,allowedActionTools=[],capabilities=null,tasks=null}={}){
+  #store;#subjectId;#session;#lookup;#decide;#config;#lookupPolicy;#workspace;#identity;#style;#eventBypass;#materialsFor;#maxCalls;#box;#shared;#limits;#outbox;#tendency;#allowed;#capabilities;#tickChain;#tasks;
+  constructor({store,subjectId,decide,workspace,identity='',style='',eventBypass=false,materialsFor=null,rhythm={},lookupPolicy=null,maxCallsPerTurn=null,maxForeground=null,tendency=null,allowedActionTools=[],capabilities=null,tasks=null,shared=null,limits=null}={}){
+    // 容量统一来自 limits；显式参数仍然优先，保持旧调用方式可用。
+    this.#limits=limits??resolveLimits();
+    lookupPolicy??={maxReads:this.#limits.lookupReads,maxHits:this.#limits.lookupHits};
+    maxCallsPerTurn??=this.#limits.callsPerTurn;maxForeground??=this.#limits.foreground;
     ensure(store&&typeof store.execute==='function','TURN_DRIVER','store required');
     text(subjectId,'subject id');ensure(typeof decide==='function','TURN_DRIVER','decide function required');
     const w=store.read(workspace?.id??workspace,workspace?.revision);
@@ -33,11 +59,16 @@ export class TurnDriver {
     this.#session=new ContinuitySession({store,subjectId,attention:true,maxForeground});
     this.#lookup=new LocalLookupSession({store,subjectId,policy:lookupPolicy});
     this.#config=rhythmConfig(rhythm);
-    this.#state={lastWakeAt:null,nextWakeAt:null,callsToday:0,dayKey:null};
+    // 同一主体的多个会话（每个 QQ 聊天一个 driver）共享一份节律/预算状态和宿主提示；
+    // 以前每个 driver 各记各的，写回同一条 rhythm note 时互相覆盖，日调用上限也按会话数放大。
+    this.#shared=shared??{};
+    this.#shared.rhythm??={state:{lastWakeAt:null,nextWakeAt:null,callsToday:0,dayKey:null}};
+    this.#shared.notices??=[];
+    this.#box=this.#shared.rhythm;
     this.#outbox=[];
     this.#tickChain=Promise.resolve();
   }
-  get state(){return {...this.#state};}
+  get state(){return {...this.#box.state};}
   get subjectId(){return this.#subjectId;}
   setStyle(style){this.#style=String(style??'').slice(0,16000);}
 
@@ -69,7 +100,7 @@ export class TurnDriver {
       pending=[...pending.filter(item=>item.status==='received'),...pending.filter(item=>item.status!=='received')];
     }
     const day=dayKey??new Date(now).toISOString().slice(0,10);
-    const calls=day===this.#state.dayKey?this.#state.callsToday:0;
+    const calls=day===this.#box.state.dayKey?this.#box.state.callsToday:0;
     // 记忆机会不受“节律还没到”限制；否则 idleReflect 在非 beat 时刻永远返回 wake:false。
     // 但仍尊重当天模型调用上限，不绕过预算。
     if(memoryUpdate&&pending.length===0){
@@ -81,15 +112,15 @@ export class TurnDriver {
     const fresh=eventId!==null?pending:pending.filter(item=>item.status==='received');
     if(eventBypass&&fresh.length>0){
       const dayKeyNow=dayKey??new Date(now).toISOString().slice(0,10);
-      const callsNow=dayKeyNow===this.#state.dayKey?this.#state.callsToday:0;
+      const callsNow=dayKeyNow===this.#box.state.dayKey?this.#box.state.callsToday:0;
       if(callsNow>=this.#config.dailyCallCap)return {wake:false,reason:'budget',pending:pending.length};
-      if(dayKeyNow!==this.#state.dayKey)this.#state.callsToday=0; // 跨天重置，否则旁路路径的日上限永不归零
-      this.#state.lastWakeAt=now;this.#state.dayKey=dayKeyNow;
+      if(dayKeyNow!==this.#box.state.dayKey)this.#box.state.callsToday=0; // 跨天重置，否则旁路路径的日上限永不归零
+      this.#box.state.lastWakeAt=now;this.#box.state.dayKey=dayKeyNow;
       return this.#runDecision({now,observation:fresh[0],reason:'event'});
     }
-    const r=rhythmTick({now,localHour:hour,state:{lastWakeAt:this.#state.lastWakeAt??(now),nextWakeAt:this.#state.nextWakeAt,
+    const r=rhythmTick({now,localHour:hour,state:{lastWakeAt:this.#box.state.lastWakeAt??(now),nextWakeAt:this.#box.state.nextWakeAt,
       callsToday:calls,clockSuspect:false,pendingEvents:pending.length},config:this.#config});
-    this.#state={lastWakeAt:r.state.lastWakeAt,nextWakeAt:r.state.nextWakeAt,callsToday:r.state.callsToday,dayKey:day};
+    this.#box.state={lastWakeAt:r.state.lastWakeAt,nextWakeAt:r.state.nextWakeAt,callsToday:r.state.callsToday,dayKey:day};
     if(!r.wake)return {wake:false,reason:r.reason,nextAt:r.nextAt};
     if(!r.modelAllowed)return {wake:true,reason:r.reason,action:'budget-blocked',pending:pending.length,nextAt:r.nextAt};
     if(pending.length===0)return this.#runReflection({now,reason:r.reason});
@@ -103,17 +134,20 @@ export class TurnDriver {
   }
   async #runReflection({now,reason,memoryUpdate=false,task=null,memoryWindow=null}){
     const internal=reflectionFrame({read:(id,rev)=>this.#store.read(id,rev),subjectId:this.#subjectId,workspace:this.#workspace,now,
-      sinceLastInteraction:this.#state.lastWakeAt===null?null:Math.max(0,now-this.#state.lastWakeAt),
-      waitingUntil:this.#state.nextWakeAt});
+      sinceLastInteraction:this.#box.state.lastWakeAt===null?null:Math.max(0,now-this.#box.state.lastWakeAt),
+      waitingUntil:this.#box.state.nextWakeAt});
     const lookups=[],outbox=[];let decision=null,choiceKind=null;
+    const taskDue=task?{id:task.id,goal:task.goal,currentStep:task.currentStep,nextStep:task.nextStep,checkpoint:task.checkpoint,status:task.status}:null;
     for(let c=0;c<this.#maxCalls;c++){
-      const packet=prepareReflection({store:this.#store,subjectId:this.#subjectId,workspace:this.#workspace,identity:this.#identity,
-        internal,budgetBytes:120000,allowedActionTools:this.#allowed,lookupResults:lookups,capabilities:this.#capabilities,tasks:this.#tasks?.()??[],memoryUpdateDue:memoryUpdate,memoryWindow,style:this.#style,taskWake:reason==='task-due',taskDue:task?{id:task.id,goal:task.goal,currentStep:task.currentStep,nextStep:task.nextStep,checkpoint:task.checkpoint,status:task.status}:null});
-      this.#state.callsToday++;
+      const build=extra=>prepareReflection({store:this.#store,subjectId:this.#subjectId,workspace:this.#workspace,identity:this.#identity,
+        internal,budgetBytes:this.#limits.inputBytes,allowedActionTools:this.#allowed,lookupResults:lookups,capabilities:this.#capabilities,tasks:this.#tasks?.()??[],memoryUpdateDue:memoryUpdate,memoryWindow,style:this.#style,taskWake:reason==='task-due',taskDue,...extra});
+      const {packet,rebuild,notices}=this.#prepareAdaptive(build);
+      this.#box.state.callsToday++;
       const output=await this.#decide(packet);
       const decisionId=`reflection:${packet.packetId}:${Date.now().toString(36)}`;
-      decision=this.#commitWithFallback({packet,output,decisionId,requestId:decisionId});
-      observeAssociation({store:this.#store,packet,decision});
+      const committed=this.#commitWithFallback({packet,output,decisionId,requestId:decisionId,rebuild,notices});
+      decision=committed.decision;
+      observeAssociation({store:this.#store,packet:committed.packet,decision});
       const choice=decision.output.options.find(o=>o.id===decision.output.selected);choiceKind=choice.kind;
       if(choice.kind==='lookup'){
         if(c+1>=this.#maxCalls)return {wake:true,reason,action:'lookup-exhausted',decision:ref(decision),lookups};
@@ -121,7 +155,7 @@ export class TurnDriver {
         continue;
       }
       this.#pushChoice(outbox,choice,decision);
-      if(choice.kind==='wait'&&Number.isSafeInteger(choice.payload?.wakeAt)&&choice.payload.wakeAt>now)this.#state.nextWakeAt=choice.payload.wakeAt;
+      if(choice.kind==='wait'&&Number.isSafeInteger(choice.payload?.wakeAt)&&choice.payload.wakeAt>now)this.#box.state.nextWakeAt=choice.payload.wakeAt;
       break;
     }
     this.#outbox.push(...outbox);
@@ -140,14 +174,16 @@ export class TurnDriver {
     }
     let decision=null,choiceKind=null;
     for(let c=0;c<this.#maxCalls;c++){
-      const packet=this.#session.prepare({currentEvent:current,workspace:this.#workspace,identity:this.#identity,style:this.#style,materials,previousDecisions:[],
+      const build=extra=>this.#session.prepare({currentEvent:current,workspace:this.#workspace,identity:this.#identity,style:this.#style,materials,previousDecisions:[],
         mind:true,unified:true,workbenchMaterials:true,workbenchFocus:true,workbenchRecovery:true,
-        localLookupPolicy:this.#lookupPolicy,lookupResults:lookups,allowedActionTools:this.#allowed,budgetBytes:120000,now,capabilities:this.#capabilities,tasks:this.#tasks?.()??[]});
-      this.#state.callsToday++;
+        localLookupPolicy:this.#lookupPolicy,lookupResults:lookups,allowedActionTools:this.#allowed,budgetBytes:this.#limits.inputBytes,now,capabilities:this.#capabilities,tasks:this.#tasks?.()??[],...extra});
+      const {packet,rebuild,notices}=this.#prepareAdaptive(build);
+      this.#box.state.callsToday++;
       const output=await this.#decide(packet);
       const decisionId=`${event.id}:decision:${c}:${Date.now().toString(36)}`;
-      decision=this.#commitWithFallback({packet,output,decisionId,requestId:`turn:${event.id}:${c}:${Date.now().toString(36)}`});
-      observeAssociation({store:this.#store,packet,decision});
+      const committed=this.#commitWithFallback({packet,output,decisionId,requestId:`turn:${event.id}:${c}:${Date.now().toString(36)}`,rebuild,notices});
+      decision=committed.decision;
+      observeAssociation({store:this.#store,packet:committed.packet,decision});
       const choice=decision.output.options.find(o=>o.id===decision.output.selected);choiceKind=choice.kind;
       if(choice.kind==='lookup'){
         if(c+1>=this.#maxCalls)return {wake:true,reason,action:'lookup-exhausted',decision:ref(decision),outbox,lookups};
@@ -155,29 +191,84 @@ export class TurnDriver {
         continue;
       }
       this.#pushChoice(outbox,choice,decision);
-      if(choice.kind==='wait'&&Number.isSafeInteger(choice.payload?.wakeAt)&&choice.payload.wakeAt>now)this.#state.nextWakeAt=choice.payload.wakeAt;
+      if(choice.kind==='wait'&&Number.isSafeInteger(choice.payload?.wakeAt)&&choice.payload.wakeAt>now)this.#box.state.nextWakeAt=choice.payload.wakeAt;
       break;
     }
     this.#outbox.push(...outbox);
     return {wake:true,reason,action:'decided',decision:ref(decision),choice:choiceKind,silent:!outbox.some(o=>o.kind==='respond'),outbox:[...outbox],lookups};
   }
 
-  #commitWithFallback({packet,output,decisionId,requestId}){
-    try{return this.#session.commit({packet,output,decisionId,requestId,allowedActionTools:this.#allowed,maxOutputBytes:32768});}
-    catch(error){
-      const stateErrors=new Set(['RESIDENCY_CONFLICT','UNDELIVERED_BASIS','UNREAD_STATE','MIND_KIND','STALE_SUBJECT','STALE_ATTENTION']);
-      if(!stateErrors.has(error.code)||!output?.continuity)throw error;
-      // 状态更新不合法时保留本轮说话/动作，丢弃这次状态增量，避免整轮静默失败。
-      const fallback={...output,continuity:{...output.continuity,changes:[],residency:{add:[],remove:[]},attention:{processes:[],relations:[],residency:{upsert:[],remove:[]},questions:[]}}};
-      try{return this.#session.commit({packet,output:fallback,decisionId,requestId,allowedActionTools:this.#allowed,maxOutputBytes:32768});}
-      catch(second){
-        if(!['RESIDENCY_CONFLICT','UNDELIVERED_BASIS','UNREAD_STATE','MIND_KIND','STALE_SUBJECT','STALE_ATTENTION'].includes(second.code))throw second;
-        // 第二次仍失败：完全不带 continuity 提交，保留说话/动作，不写状态。
-        const bare={...output};delete bare.continuity;
-        return this.#session.commit({packet,output:bare,decisionId,requestId,allowedActionTools:this.#allowed,maxOutputBytes:32768});
+  // 组装输入包。最近上下文不再固定 50 条：超出字节预算时逐步缩小最近上下文再试，
+  // 而不是整轮 INPUT_OVERFLOW 没有回复。返回的 rebuild 用同样的规模在最新状态上重新组装。
+  #prepareAdaptive(build){
+    const notices=this.#shared.notices.slice(-this.#limits.hostNotices);
+    let recent={items:this.#limits.recentItems,bytes:this.#limits.recentBytes,chats:this.#limits.recentChats,
+      chatTail:this.#limits.recentChatTail,chatWindowMs:this.#limits.recentChatWindowHours*3600000};
+    for(let attempt=0;;attempt++){
+      const extra={recent,hostNotices:notices};
+      try{
+        const packet=build(extra);
+        if(attempt>0)this.#diagnose('input.shrunk','ok',{packet,data:{attempts:attempt,recent}});
+        return {packet,rebuild:()=>build(extra),notices};
+      }catch(error){
+        if(error.code!=='INPUT_OVERFLOW'||recent.items<=4)throw error;
+        // 先缩其他会话的预览，再缩当前聊天；会话列表本身（谁在等她）尽量保留
+        recent={...recent,items:Math.max(4,Math.floor(recent.items*0.6)),bytes:Math.max(2000,Math.floor(recent.bytes*0.6)),
+          chatTail:Math.max(1,Math.floor(recent.chatTail/2))};
       }
     }
-  }  #pushChoice(outbox,choice,decision){
+  }
+
+  // 提交她的决定。
+  // 1) 并发导致的过期（STALE_*）：她的决定没有错，只是别的会话先提交了。在最新状态上重新组装输入、
+  //    原样重放这个决定（不再调用模型）。只有她改的状态在此期间被别处改过时才会真正冲突。
+  // 2) 状态增量本身不合法或确实冲突：保留说话/动作，丢弃状态增量——但不再静默：写诊断，
+  //    并在下一轮输入的 hostNotices 里告诉她哪些修改没存上，让她自己决定要不要重做。
+  #commitWithFallback({packet,output,decisionId,requestId,rebuild=null,notices=[]}){
+    const commit=(p,o,suffix)=>this.#session.commit({packet:p,output:o,decisionId:decisionId+suffix,requestId:requestId+suffix,allowedActionTools:this.#allowed,maxOutputBytes:32768});
+    const done=(decision,p,mode)=>{this.#consumeNotices(notices);if(mode!=='direct')this.#diagnose('decision.'+mode,'ok',{packet:p,data:{decisionId:decision.id}});return {decision,packet:p,mode};};
+    try{return done(commit(packet,output,''),packet,'direct');}
+    catch(error){
+      if(!STATE_ERRORS.has(error.code))throw error;
+      const parsed=parseOutput(output);
+      if(!parsed?.continuity)throw error;
+      let base=packet,lastError=error;
+      if(STALE_ERRORS.has(error.code)&&rebuild){
+        try{
+          base=rebuild();
+          return done(commit(base,{...parsed,packetId:base.packetId},':rebased'),base,'rebased');
+        }catch(second){if(!STATE_ERRORS.has(second.code))throw second;lastError=second;}
+      }
+      const dropped=droppedChanges(parsed.continuity);
+      const stripped={...parsed,packetId:base.packetId,continuity:{...parsed.continuity,changes:[],residency:{add:[],remove:[]},attention:keepAttention()}};
+      let decision;
+      try{decision=commit(base,stripped,':stripped');}
+      catch(third){
+        if(!STATE_ERRORS.has(third.code))throw third;
+        const bare={...parsed,packetId:base.packetId};delete bare.continuity;
+        decision=commit(base,bare,':bare');
+      }
+      this.#remember({kind:'state-not-saved',code:lastError.code,message:String(lastError.message).slice(0,200),decision:ref(decision),scene:base.payload?.workspace?.scene??null,dropped});
+      return done(decision,base,'degraded');
+    }
+  }
+  #remember(notice){
+    if(this.#limits.hostNotices===0)return;
+    this.#shared.notices.push({format:'host-notice-v1',at:Date.now(),...notice});
+    while(this.#shared.notices.length>this.#limits.hostNotices)this.#shared.notices.shift();
+    this.#diagnose('decision.state-dropped','degraded',{data:notice});
+    console.warn('[threadline] state changes not saved:',notice.code,JSON.stringify(notice.dropped).slice(0,300));
+  }
+  #consumeNotices(delivered){
+    if(!delivered.length)return;
+    const keys=new Set(delivered.map(n=>canonical(n)));
+    this.#shared.notices=this.#shared.notices.filter(n=>!keys.has(canonical(n)));
+  }
+  #diagnose(stage,status,{packet=null,data={}}={}){
+    try{this.#store.recordDiagnostic({stage,status,context:{subjectId:this.#subjectId,...(packet?{packetId:packet.packetId}:{})},data});}catch{}
+  }
+  get notices(){return this.#shared.notices.map(n=>({...n}));}
+  #pushChoice(outbox,choice,decision){
     const speech=choice.kind==='respond'||(choice.kind==='turn'&&Array.isArray(choice.payload.utterances)&&choice.payload.utterances.length)?choice.payload:null;
     if(speech){const response=this.#store.read(`${decision.id}:response`);outbox.push({kind:'respond',text:speech.text??speech.utterances?.[0]?.text??'',...(Array.isArray(speech.utterances)?{utterances:speech.utterances}:{}),...(response?{response:{id:response.id,revision:response.revision}}:{})});}
     if(choice.kind==='act')outbox.push({kind:'act',tool:choice.payload.tool,args:choice.payload.args,action:decision.action??null});
@@ -214,19 +305,19 @@ export class TurnDriver {
     return true;
   }
   persistState(){
-    const id=`rhythm:${this.#subjectId}`,old=this.#store.read(id),body=canonical({format:'rhythm-state-v1',...this.#state});
+    const id=`rhythm:${this.#subjectId}`,old=this.#store.read(id),body=canonical({format:'rhythm-state-v1',...this.#box.state});
     const out=this.#store.execute({requestId:`rhythm-state:${digest({id,body,expected:old?.revision??0})}`,
       commands:[{op:'write_note',id,expectedRevision:old?.revision??0,kind:'skill',change:'self_report',evidence:[],body}]}).at(-1);
     return ref(out.record);
   }
 
-  snapshot(){return {state:{...this.#state},outbox:[...this.#outbox]};}
+  snapshot(){return {state:{...this.#box.state},outbox:[...this.#outbox]};}
   restore(snapshot){
     ensure(snapshot&&typeof snapshot==='object','TURN_DRIVER','snapshot required');
     const s=snapshot.state??{};
     for(const key of ['lastWakeAt','nextWakeAt'])ensure(s[key]===null||Number.isSafeInteger(s[key]),'TURN_DRIVER',`invalid ${key}`);
     ensure(Number.isSafeInteger(s.callsToday??0)&&(s.callsToday??0)>=0,'TURN_DRIVER','invalid callsToday');
-    this.#state={lastWakeAt:s.lastWakeAt??null,nextWakeAt:s.nextWakeAt??null,callsToday:s.callsToday??0,dayKey:s.dayKey??null};
+    this.#box.state={lastWakeAt:s.lastWakeAt??null,nextWakeAt:s.nextWakeAt??null,callsToday:s.callsToday??0,dayKey:s.dayKey??null};
     this.#outbox=Array.isArray(snapshot.outbox)?[...snapshot.outbox]:[];
   }
 }

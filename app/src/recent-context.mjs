@@ -1,8 +1,8 @@
-// 全局最近上下文：所有来源的真实消息按时间合并，最近 limit 条直接进入本轮输入。
+// 最近上下文：她“刚刚各处发生了什么”的视图。有当前聊天时组织成会话面板，没有时按时间合并。
 // 与长期记忆分开：这里只回答“刚刚各处发生了什么”，不做摘要。
 import {refKey} from './contracts.mjs';
 
-const MAX_BYTES=20000; // 90KB 总预算里最近上下文最多占 20KB，超了会 INPUT_OVERFLOW 导致整轮无回复
+const MAX_BYTES=32000; // 默认值；实际预算由 limits.recentBytes 传入，超预算时 turn-driver 会自动缩小再试
 const clip=(text,max=300)=>{const s=String(text??'').replace(/\s+/g,' ').trim();return s.length<=max?s:s.slice(0,max)+'…';};
 const SELF_ACTION_TOOLS=new Set(['qq_send_message','qq_send_private_message','qq_send_group_message','qq_send_sticker','qq_send_voice','qq_speak','qq_send_poke','remember_note']);
 const ownAction=tool=>SELF_ACTION_TOOLS.has(tool)||String(tool).startsWith('office_')||String(tool).startsWith('task_')||String(tool).startsWith('github_');
@@ -43,7 +43,85 @@ function actionText(action){
   else text=clip(args.text??args.message??'',300);
   return `${uncertain?'[结果未知] ':failed?'[未发出] ':''}${text}`.trim();
 }
-export function recentContext({store,subjectId,currentEvent=null,limit=50}={}){
+// 会话面板（recent-context-v2）：像一个人挂着 QQ——
+//   here   当前打开的聊天：完整的最近记录（她自己说的、对方说的、她做的动作）
+//   chats  所有其他活跃会话：未读几条、最后谁说的、是不是在等她回、她上一句发出去没有、最近几条预览
+// 规模全部来自参数（limits.mjs），超出字节预算时先缩其他会话的预览，最后才缩当前聊天。
+export function recentContext({store,subjectId,currentEvent=null,scene=null,items:hereLimit,limit,bytes=MAX_BYTES,
+  chats:chatLimit=24,chatTail=8,chatWindowMs=48*3600000,now=Date.now()}={}){
+  hereLimit=hereLimit??limit??50;
+  const all=collectItems({store,subjectId,currentEvent});
+  if(scene===null)return legacyView(all,hereLimit,bytes);
+
+  // 未读：收件箱里还没处理的观察，按会话统计
+  const unread=new Map(),pendingIds=new Set();
+  for(const entry of pendingInbox(store,subjectId)){
+    if(currentEvent&&entry.eventId===currentEvent.id)continue;
+    pendingIds.add(entry.eventId);
+    let ev=null;try{ev=store.read(entry.eventId);}catch{}
+    const key=ev?.scene??null;if(!key)continue;
+    unread.set(key,(unread.get(key)??0)+1);
+  }
+  const byScene=new Map();
+  for(const item of all){
+    const key=item.scene??scene; // 没有场景的自身动作（比如记笔记）算在当前聊天
+    if(!byScene.has(key))byScene.set(key,[]);
+    byScene.get(key).push(item);
+  }
+  let here=(byScene.get(scene)??[]).slice(-Math.max(1,hereLimit)).map(x=>!x.self&&pendingIds.has(x.ref.id)?{...x,unread:true}:x);
+  byScene.delete(scene);
+  for(const key of unread.keys())if(key!==scene&&!byScene.has(key))byScene.set(key,[]);
+
+  let chats=[...byScene.entries()].map(([key,list])=>chatEntry(key,list,unread.get(key)??0))
+    .filter(c=>c.unread>0||now-(c.lastAt??0)<=chatWindowMs)
+    .sort((a,b)=>(b.unread>0)-(a.unread>0)||(b.lastAt??0)-(a.lastAt??0)||a.scene.localeCompare(b.scene));
+  const omittedChats=Math.max(0,chats.length-chatLimit);
+  chats=chats.slice(0,chatLimit);
+  // 预览条数按活跃度分配：越靠前（有未读/最近有动静）给得越多
+  chats=chats.map((c,i)=>{const tail=Math.max(chatTail>0?1:0,Math.ceil(chatTail*(i<3?1:i<8?0.6:0.35)));
+    const list=byScene.get(c.scene)??[];return {...c,tail:list.slice(-tail),omitted:Math.max(0,list.length-tail)};});
+
+  const size=()=>Buffer.byteLength(JSON.stringify({here,chats}));
+  // 超预算：先从排得最靠后的会话开始砍预览，再砍当前聊天最旧的记录
+  for(let i=chats.length-1;size()>bytes&&i>=0;i--){
+    while(chats[i].tail.length>1&&size()>bytes){chats[i].tail.shift();chats[i].omitted++;}
+  }
+  while(here.length>1&&size()>bytes)here=here.slice(1);
+  return {format:'recent-context-v2',scope:'current-chat-plus-session-list',scene,
+    here:{scene,label:streamLabel(scene),count:here.length,unread:here.filter(x=>x.unread).length,items:here},
+    chats,omittedChats,
+    meaning:'here=the-chat-you-are-answering; chats=other-live-sessions-you-can-see-like-a-qq-session-list; tails-are-recent-not-complete'};
+}
+
+function pendingInbox(store,subjectId,maxPages=5){
+  const out=[];let afterSeq=0;
+  for(let i=0;i<maxPages;i++){const page=store.subjectInbox({subjectId,afterSeq,limit:100,pendingOnly:true});out.push(...page.items);if(page.next===null)break;afterSeq=page.next;}
+  return out;
+}
+function chatEntry(scene,list,unread){
+  const last=list.at(-1)??null,lastSelf=[...list].reverse().find(x=>x.self)??null,lastOther=[...list].reverse().find(x=>!x.self)??null;
+  return {scene,label:streamLabel(scene),kind:scene.startsWith('qq/group/')?'group':scene.startsWith('qq/private/')?'private':scene.split('/')[0]||'other',
+    unread,lastAt:last?.at??null,lastSpeaker:last?(last.self?'self':'other'):null,
+    // 最后一句是别人说的，而且她还没处理完：像 QQ 里“有人在等你回”
+    waitingOnYou:unread>0||(last!==null&&!last.self),
+    yourLastMessage:lastSelf?{text:lastSelf.text,status:lastSelf.status??null,at:lastSelf.at}:null,
+    lastFromOthersAt:lastOther?.at??null};
+}
+function streamLabel(scene){
+  const parts=String(scene??'').split('/');
+  if(parts[0]==='qq'&&parts[1]==='group')return `群 ${parts.slice(2).join('/')}`;
+  if(parts[0]==='qq'&&parts[1]==='private')return `私聊 ${parts.slice(2).join('/')}`;
+  return parts.join('·');
+}
+function legacyView(items,limit,bytes){
+  // 没有当前聊天（反思/任务唤醒）：按时间合并所有来源，和旧行为一致
+  let selected=items.slice(-Math.max(1,Math.min(200,limit)));
+  let size=Buffer.byteLength(JSON.stringify(selected));
+  while(selected.length>1&&size>bytes){size-=Buffer.byteLength(JSON.stringify(selected[0]))+1;selected=selected.slice(1);}
+  return {format:'recent-context-v1',scope:'all-sources',count:selected.length,items:selected};
+}
+
+function collectItems({store,subjectId,currentEvent}){
   const items=[];
   for(const event of store.all('event')){
     if(!['observed','reported'].includes(event.origin))continue;
@@ -76,9 +154,5 @@ export function recentContext({store,subjectId,currentEvent=null,limit=50}={}){
       scene:actionScene(store,action),text,...(result?{result}:{}),ref:{id:action.id,revision:action.revision}});
   }
   items.sort((a,b)=>(a.at??0)-(b.at??0)||refKey(a.ref).localeCompare(refKey(b.ref)));
-  let selected=items.slice(-Math.max(1,Math.min(100,limit)));
-  // 超字节预算时丢最旧的，保留最新
-  let bytes=Buffer.byteLength(JSON.stringify(selected));
-  while(selected.length>1&&bytes>MAX_BYTES){bytes-=Buffer.byteLength(JSON.stringify(selected[0]))+1;selected=selected.slice(1);}
-  return {format:'recent-context-v1',scope:'all-sources',count:selected.length,items:selected};
+  return items;
 }
