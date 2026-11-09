@@ -1,0 +1,209 @@
+﻿<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>鲸漾 · 控制台</title>
+<style>
+:root{--bg:#f6f4ef;--panel:#fffdf8;--ink:#25231f;--muted:#77716a;--line:#e7e1d7;--accent:#2f6f68;--warm:#b56b45}
+*{box-sizing:border-box}
+body{margin:0;background:var(--bg);color:var(--ink);font:15px/1.55 system-ui,"Microsoft YaHei",sans-serif}
+header{display:flex;align-items:center;justify-content:space-between;padding:22px 28px 8px;max-width:1080px;margin:auto}
+h1{font-size:21px;margin:0;letter-spacing:.04em}
+.dot{display:inline-block;width:8px;height:8px;border-radius:50%;background:#b8b0a5;margin-right:7px}
+.dot.ok{background:#3d8b71}.dot.bad{background:#b55245}
+.muted{color:var(--muted);font-size:13px}
+main{max-width:1080px;margin:auto;padding:14px 28px 40px;display:grid;grid-template-columns:1.15fr .85fr;gap:16px}
+.card{background:var(--panel);border:1px solid var(--line);border-radius:14px;padding:18px;box-shadow:0 1px 0 rgba(0,0,0,.02)}
+.card h2{font-size:14px;margin:0 0 12px;color:var(--muted);font-weight:600;letter-spacing:.06em}
+.wide{grid-column:1/-1}
+.row{display:flex;gap:14px;flex-wrap:wrap}
+.stat{flex:1;min-width:90px}
+.stat b{display:block;font-size:22px;font-weight:650}
+.stat span{font-size:12px;color:var(--muted)}
+label{display:block;font-size:12px;color:var(--muted);margin:10px 0 5px}
+input,textarea,button{font:inherit;border-radius:9px;border:1px solid var(--line);background:#fff;color:var(--ink);padding:8px 10px}
+textarea{width:100%;min-height:180px;resize:vertical;line-height:1.6}
+button{cursor:pointer;background:var(--accent);color:#fff;border-color:var(--accent);padding:7px 12px}
+button.ghost{background:transparent;color:var(--ink);border-color:var(--line)}
+button.warn{background:#a2493e;border-color:#a2493e}
+button:disabled{opacity:.45;cursor:default}
+.actions{display:flex;gap:8px;flex-wrap:wrap;margin-top:10px}
+.list{display:flex;flex-direction:column;gap:6px;margin-top:10px}
+.item{display:flex;justify-content:space-between;align-items:center;gap:10px;border-top:1px solid var(--line);padding-top:8px;font-size:13px}
+.tag{display:inline-block;background:#eef4f1;color:#2f6f68;border-radius:6px;padding:1px 7px;font-size:12px;margin-left:6px}
+.note{background:#faf6ee;border:1px solid #eadfcd;border-radius:9px;padding:10px 12px;font-size:13px;color:#6c5a44}
+.small{font-size:12px;color:var(--muted)}
+#chat{height:300px;overflow:auto;border:1px solid var(--line);border-radius:10px;padding:10px;background:#fff;display:flex;flex-direction:column;gap:8px}
+.msg{max-width:80%;padding:7px 11px;border-radius:12px;white-space:pre-wrap;word-break:break-word}
+.msg.user{align-self:flex-end;background:#e4efec}.msg.her{align-self:flex-start;background:#f3ece0}
+.msg.sys{align-self:center;color:var(--muted);font-size:12px}
+.banner{border-radius:9px;padding:9px 12px;font-size:13px;margin-bottom:10px;display:none}
+.banner.err{display:block;background:#fbeeec;border:1px solid #e8c4be;color:#8b3a2f}
+@media(max-width:760px){main{grid-template-columns:1fr;padding:12px 16px 30px}header{padding:18px 16px 6px}}
+</style>
+</head>
+<body>
+<header>
+  <div><h1>鲸漾 · 控制台</h1><div class="muted" id="sub">连接中…</div></div>
+  <div class="muted"><span class="dot" id="dot"></span><span id="mode">—</span></div>
+</header>
+<main>
+  <section class="card wide">
+    <h2>和她聊天（本机）</h2>
+    <div class="banner" id="banner"></div>
+    <div id="chat"></div>
+    <div class="actions">
+      <input id="say" placeholder="说点什么…（回车发送）" style="flex:1;min-width:200px">
+      <button id="sendBtn">发送</button>
+    </div>
+    <div class="small" style="margin-top:6px">这里的对话和 QQ 共用同一个她、同一份记忆；来源只是标签。</div>
+  </section>
+
+  <section class="card wide" id="keyCard">
+    <h2>模型密钥</h2>
+    <div class="small" id="keyState">—</div>
+    <div class="actions">
+      <input id="keyInput" type="password" placeholder="粘贴 DeepSeek API Key（sk-…）" style="flex:1;min-width:240px" autocomplete="off">
+      <button id="keyBtn">保存密钥</button>
+    </div>
+    <div class="small" style="margin-top:6px">密钥只保存在本机 data/secrets 目录，不会上传、不进日志。日预算默认 3 元 / 96 次，超了自动停。</div>
+  </section>
+
+  <section class="card wide" id="qqCard">
+    <h2>接入 QQ</h2>
+    <div class="note" id="qqState">检测中…</div>
+    <details style="margin-top:10px"><summary class="small" style="cursor:pointer">怎么接？（只需要做一次）</summary>
+      <ol class="small" style="line-height:1.9;margin:8px 0 0 18px;padding:0">
+        <li>QQ 传输程序 SnowLuma 不能由本包代为分发（它的协议不允许），请自己到官方页面下载：
+          <a href="https://github.com/SnowLuma/SnowLuma/releases" target="_blank" rel="noopener noreferrer">github.com/SnowLuma/SnowLuma/releases</a>，下载 Windows 完整包并解压到任意位置。</li>
+        <li>按它自己的说明启动（Windows 运行它的 launcher.bat），打开它的管理页，登录 QQ，并添加 OneBot 连接：
+          <b>WebSocket 服务端 端口 3001</b>、<b>HTTP 服务端 端口 3000</b>（默认值，不用改本包任何东西）。</li>
+        <li>回到这里，上面状态变成“已连接”就好了。之后她会收到 QQ 里的私聊和群消息，并回复。</li>
+        <li>如果你的端口或令牌不一样：在 data 文件夹里新建 <code>qq.json</code>，内容如 <code>{"ws":"ws://127.0.0.1:3001/","http":"http://127.0.0.1:3000","token":""}</code>，重启即可。</li>
+      </ol>
+      <div class="small" style="margin-top:8px">提醒：用非官方协议工具登录 QQ 有账号被限制的风险，SnowLuma 的 EULA 也写明风险自负；建议先用小号试。</div>
+    </details>
+  </section>
+
+  <section class="card">
+    <h2>她现在</h2>
+    <div class="row">
+      <div class="stat"><b id="pending">—</b><span>待处理</span></div>
+      <div class="stat"><b id="events">—</b><span>事件</span></div>
+      <div class="stat"><b id="notes">—</b><span>记忆</span></div>
+      <div class="stat"><b id="states">—</b><span>状态</span></div>
+    </div>
+    <div class="note" style="margin-top:14px" id="summary">正在读取…</div>
+  </section>
+
+  <section class="card">
+    <h2>注意力</h2>
+    <div class="small" id="mutedList">没有屏蔽</div>
+    <div class="actions">
+      <input id="prefix" placeholder="qq/group/9" style="flex:1;min-width:150px">
+      <button data-act="mute">暂时屏蔽</button>
+      <button class="ghost" data-act="unmute">恢复</button>
+    </div>
+    <div class="actions"><button class="ghost" data-act="loadBacklog">加载积压</button></div>
+  </section>
+
+  <section class="card wide">
+    <h2>说话方式</h2>
+    <div class="small" id="styleMeta">—</div>
+    <label for="styleText">当前风格包（可改，保存后成为新版本）</label>
+    <textarea id="styleText" placeholder="加载中…"></textarea>
+    <div class="actions">
+      <button data-act="saveStyle">保存新版本</button>
+      <button class="ghost" data-act="reloadStyle">重新读取</button>
+    </div>
+    <div class="list" id="styleList"></div>
+  </section>
+
+  <section class="card wide">
+    <h2>每天整理</h2>
+    <div class="small">已接每日整理：默认北京时间 03:30 后检查，每天最多一次；忙时推迟。它只整理已交付的记忆，不冒充新经历。</div>
+    <div class="note" style="margin-top:10px">整理内容：BCRZ 状态、长期笔记、事件关联、未处理观察。</div>
+  </section>
+</main>
+<script>
+const $=id=>document.getElementById(id);
+const esc=t=>String(t).replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
+async function api(path,opts={}){
+  const r=await fetch('/api/brain'+path,{headers:{'content-type':'application/json'},...opts});
+  const v=await r.json().catch(()=>({}));
+  if(!r.ok)throw new Error(v.message||v.error||('HTTP '+r.status));
+  return v;
+}
+let sending=false;
+const errText={STUDY_KEY_REQUIRED:'还没有填写模型密钥，请在下方“模型密钥”里填写。',NETWORK_PREFLIGHT_FAILED:'连不上 DeepSeek（网络检查未通过），请检查网络或代理。',BUDGET_HALTED:'今日预算已停（费用无法确认），明天自动恢复或检查 budget.json。',CALL_LIMIT:'今天的调用次数用完了。',SPEND_LIMIT:'今天的预算用完了。',PROVIDER_HTTP:'DeepSeek 返回了错误（密钥无效或余额不足？）。'};
+function showError(e){
+  const b=$('banner');
+  if(!e){b.className='banner';b.textContent='';return}
+  b.className='banner err';b.textContent=(errText[e.code]||e.message||e.code)+'（'+e.code+'）';
+}
+async function refresh(){
+  try{
+    const [h,s,st,set]=await Promise.all([api('/health'),api('/v1/stats'),api('/v1/style/text'),api('/v1/settings')]);
+    const rt=h.runtime||{};
+    $('dot').className='dot ok';$('mode').textContent=rt.mode==='live'?'在线':'dry-run（未接模型）';
+    $('sub').textContent='一个主体 · 全局上下文 · 串行';
+    showError(h.lastError);
+    $('pending').textContent=(h.pending||[]).reduce((n,x)=>n+(x.count||0),0);
+    $('events').textContent=s.counts.event;$('notes').textContent=s.counts.note;$('states').textContent=s.counts.personal_state;
+    const bud=rt.budget;
+    $('summary').textContent=(h.active?('当前场景：'+h.active):'当前空闲')+' · 场景数 '+h.scenes+(bud?(' · 今日 '+bud.calls+'/'+bud.maxCalls+' 次，约 '+(bud.costMicros/1e6).toFixed(3)+'/'+(bud.limitMicros/1e6)+' 元'+(bud.halted?' · 已停：'+bud.halted:'')):'');
+    $('keyState').textContent=set.keyConfigured?'已配置密钥 ✓（可重新填写覆盖）':'未配置密钥——填写后她才能回话';
+    const a=s.attention||{};$('mutedList').textContent=(a.prefixes||[]).length?('屏蔽中：'+a.prefixes.join('、')+' · 积压 '+a.backlog):'没有屏蔽';
+    $('styleMeta').textContent=st.active?('当前：'+st.active.label+' · '+st.active.chars+' 字'):'还没有风格包';
+    if(document.activeElement!==$('styleText'))$('styleText').value=st.text||'';
+    $('styleList').innerHTML=(st.items||[]).map(x=>'<div class="item"><span>'+esc(x.label)+'<span class="tag">'+esc(x.id.slice(-6))+'</span></span><button class="ghost" data-del="'+esc(x.id)+'">删除</button></div>').join('')||'<div class="small">没有旧版本</div>';
+    await refreshChat();refreshQq();
+  }catch(e){$('dot').className='dot bad';$('mode').textContent='离线';$('sub').textContent=e.message}
+}
+async function refreshQq(){
+  try{
+    const r=await fetch('/api/qq-status');const q=await r.json();const el=$('qqState');
+    const stale=q.known&&Date.now()-q.updatedAt>120000&&!q.connected;
+    if(!q.known)el.textContent='QQ 连接器还没有报告状态（刚启动，或没在运行）。只用本地聊天不受影响。';
+    else if(q.connected)el.textContent='已连接 ✓ '+(q.nickname?('账号：'+q.nickname+' '):'')+(q.selfId?('('+q.selfId+') '):'')+'· '+q.url+(q.lastMessageAt?(' · 最近收到消息 '+new Date(q.lastMessageAt).toLocaleTimeString()):'');
+    else el.textContent='未连接，正在等待 QQ 传输（OneBot）… '+(q.url||'')+(q.lastError?('｜'+q.lastError):'')+(stale?'｜连接器可能没有运行':'');
+  }catch(e){$('qqState').textContent='读取 QQ 状态失败：'+e.message}
+}
+async function refreshChat(){
+  const v=await api('/v1/chat?scene=local/&limit=60');
+  const box=$('chat'),stick=box.scrollTop+box.clientHeight>=box.scrollHeight-30;
+  box.innerHTML=v.items.map(m=>'<div class="msg '+m.role+'">'+esc(m.text)+'</div>').join('')||'<div class="msg sys">还没有对话，说点什么吧</div>';
+  if(sending)box.insertAdjacentHTML('beforeend','<div class="msg sys">她在想…</div>');
+  if(stick)box.scrollTop=box.scrollHeight;
+}
+async function send(){
+  const text=$('say').value.trim();if(!text||sending)return;
+  sending=true;$('sendBtn').disabled=true;$('say').value='';
+  refreshChat().catch(()=>{});
+  try{
+    // 先显示自己的话；回复在服务端处理完才返回，期间聊天区靠轮询刷新
+    const v=await api('/v1/reply',{method:'POST',body:JSON.stringify({protocol:'jingyang-brain-bridge-v1',scene:'local/console',key:'local:console',message_id:Date.now()+'-'+Math.random().toString(16).slice(2),execute:false,sender:{system:'local',id:'owner',name:'哥哥',nickname:'哥哥',isOwner:true,entityId:'legacy:person:3482479936'},occurredAt:Date.now(),messages:[{role:'user',content:text}]})});
+    if(v.ok===false)showError({code:v.error,message:v.message});
+    else if(v.queued)showError({code:'QUEUED',message:'她暂时没空，消息已记下，稍后会回复。'});
+    else if(v.silent)showError({code:'SILENT',message:'她选择了不说话。'});
+    else showError(null);
+  }catch(e){showError({code:'ERROR',message:e.message})}
+  finally{sending=false;$('sendBtn').disabled=false;refresh()}
+}
+async function mute(){try{await api('/v1/attention/mute',{method:'POST',body:JSON.stringify({prefix:$('prefix').value})});refresh()}catch(e){alert(e.message)}}
+async function unmute(){try{await api('/v1/attention/unmute',{method:'POST',body:JSON.stringify({prefix:$('prefix').value,load:true})});refresh()}catch(e){alert(e.message)}}
+async function loadBacklog(){try{await api('/v1/attention/load',{method:'POST',body:JSON.stringify({prefix:$('prefix').value,limit:50})});refresh()}catch(e){alert(e.message)}}
+async function saveStyle(){try{await api('/v1/style',{method:'POST',body:JSON.stringify({text:$('styleText').value,label:'手动更新',source:'console'})});refresh()}catch(e){alert(e.message)}}
+async function delStyle(id){if(!confirm('删除这个旧风格版本？'))return;try{await api('/v1/style/delete',{method:'POST',body:JSON.stringify({id})});refresh()}catch(e){alert(e.message)}}
+async function reloadStyle(){const st=await api('/v1/style/text');$('styleText').value=st.text||'';refresh()}
+async function saveKey(){try{await api('/v1/settings/key',{method:'POST',body:JSON.stringify({key:$('keyInput').value})});$('keyInput').value='';refresh()}catch(e){alert(e.message)}}
+$('sendBtn').addEventListener('click',send);
+$('say').addEventListener('keydown',e=>{if(e.key==='Enter'&&!e.isComposing){e.preventDefault();send()}});
+$('keyBtn').addEventListener('click',saveKey);
+$('styleList').addEventListener('click',e=>{const id=e.target?.dataset?.del;if(id)delStyle(id)});
+document.querySelectorAll('[data-act]').forEach(b=>b.addEventListener('click',()=>({mute,unmute,loadBacklog,saveStyle,reloadStyle})[b.dataset.act]()));
+refresh();setInterval(refresh,4000);
+</script>
+</body>
+</html>

@@ -1,0 +1,6 @@
+本轮启用显式焦点。attention在processes/relations/residency/questions以外可含focus；不填focus表示保留选择。focus严格为{"select":["输入focusSupport.menu中的F短名"]}，最多8项；select=[]表示不选择这些材料焦点，select=null表示keep。换题、respond或表达redirect不会自动切换。可同一决定里保存状态并切焦点，不需要逐条退出旧任务材料。
+本事务新建/已读并修改的process或state，以及新建/修改的材料驻留，可用{kind:"process/state/residence",id:"该对象ID",path:[]}选作焦点；其他对象只能使用本轮F菜单。F仅是入口，不代表已读正文，不允许据此伪造依据。任务身份变化应新建ID；普通暂停保持ID，过时路径会标blocked而不自动换父任务。
+材料驻留项含id、target、cue、purposes、presentation，target为{kind:"material",ref:{id,revision}}，仅限本轮完整交付的event/note，或已保留同驻留同固定版本。presentation=full表示允许在匹配焦点时展开，entry只保留入口。材料active-task按eventIds任务、awaiting-reply按questionId匹配焦点；多个eventIds分别服务，不合并成必须同时开放。self-directed可选择kind=residence的F入口；recovery-point只留入口。affects-current-choice还必须匹配appliesTo当前观察。没用的资料可不留，不必制造新认识。
+材料项可另含focusUse:{consumer:{kind,id},owners:[{kind,id}],context:null或[{id,revision}关系路径]}；kind为process/state/question/residence/interaction（interaction的id固定current）。consumer指定在哪个焦点使用，owners额外声明依赖哪些活动仍开放；context限定从哪个父路径进入，null不限定。无需手填epoch或工作台版本。只能引用已交付的焦点/对象或本事务新建对象；未声明的父亲不会自动成为owner。同驻留同材料版本仅改entry/full时，省略focusUse保留原声明；要改消费者或归属须明确给出新对象，不能用null清除。
+full材料及过程正文按焦点交付；暂停、收起或不匹配焦点时给入口。owner结束只结束依赖它的用途，不终止共享子活动或其他用途。个人状态的连续交付独立保持，不因切焦点而消除感受、认识、关切。hidden表示用途不再可直接恢复，不代表历史删除。blocked仍保存原选择；可重新查阅或选新路径，不要猜新关系。
+同版多用途正文去重，不按重复入口放大证据。所需正文一起交付，完整messages预算不足时明确停止，不交付半组。新旧材料仍以本轮实际materials为已读依据。焦点不决定你必须说什么；不输出内部推理过程。

@@ -1,0 +1,4 @@
+本轮recoverySupport启用曾用材料查阅。收起沿用focus/entry，保留用途；remove仅解除用途，原文和退出历史仍在。不要求保留没用的材料，也不要求每次换题都remove。
+lookup可用{"workbench":{"via":"list","frame":{"id":"本轮attention.frame.id","revision":1},"task":null,"cursor":null}}列出退出项，task也可填某个过程ID。返回入口不等于读过；有nextCursor可沿同snapshot分页，空的scan-limit不代表从未用过。需要详情再用{"workbench":{"via":"read","source":{"frame":{"id":"目录给的退出帧ID","revision":2},"id":"旧用途ID"}}}。查询仍共用读取预算，不生成经历。
+输出attention.residency在upsert/remove外可含restore数组：[{"source":{"id":"已交付read回执ID","revision":1},"id":"恢复后的用途ID","presentation":"entry"}]。presentation也可选full；source必须是真实读过退出项的回执，且原文在本轮materials完整交付。目录、F菜单不代替读原文。只恢复一项绑定，不回滚工作台、不自动切焦点、不重开任务；要展开应按原用途选择匹配的任务/等待事项焦点及父路径，只有self-directed用途通过residence焦点展开。full不代表忽略用途直接展开。
+同名活用途存在则拒绝覆盖；旧任务/owner结束、父路径过期、依赖用途代际变化会返回RECOVERY_NEEDS_REBIND。此时原文仍能阅读，可用普通upsert明确建立适合现在的新用途。恢复后是新代际，旧焦点/依赖不会被悄悄复活。无需手填host token或重新编造旧用途正文。
