@@ -18,7 +18,7 @@ const SKIP_DIRS=new Set(['.git','node_modules','.office','__pycache__','.venv','
 
 const fail=(code,message)=>{const error=new Error(message);error.code=code;throw error;};
 export function officeRoot(override=null){
-  const root=resolve(override??process.env.JY_OFFICE_ROOT??DEFAULT_ROOT);
+  const root=resolve(override??process.env.THREADLINE_OFFICE_ROOT??process.env.JY_OFFICE_ROOT??DEFAULT_ROOT);
   if(!existsSync(root))fail('OFFICE_MISSING','office root does not exist');
   return root;
 }
@@ -148,7 +148,8 @@ export function searchOffice({root=null,path='.',query,max=20}={}){
 }
 const MAX_COMMAND_OUTPUT=20000;
 const GIT_CA=fileURLToPath(new URL('../../data/state/git-ca-bundle.pem',import.meta.url));
-const GIT_EXE=process.env.JY_GIT_EXE??'C:\\Program Files\\Git\\cmd\\git.exe';
+// 旧的 JY_* 变量名仍然认，避免已有部署失效；默认只在 Windows 上找 Git for Windows 的固定路径。
+const GIT_EXE=process.env.THREADLINE_GIT_EXE??process.env.JY_GIT_EXE??(process.platform==='win32'?'C:\\Program Files\\Git\\cmd\\git.exe':'git');
 const COMMANDS=new Set(['node','node.exe','python','python3','py','git','git.exe','rg','rg.exe']);
 export function runOffice({root=null,command,args=[],cwd='.',timeoutMs=20000}={}){
   return new Promise((resolve,reject)=>{

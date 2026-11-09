@@ -81,8 +81,15 @@ export const TOOL_NAMES=Object.freeze([
   'office_status','office_list','office_read','office_write','office_edit','office_search','office_run','office_npm','office_audit','office_plugin_list','office_plugin_run','office_plugin_install','github_status','github_repo','github_issues','github_issue','github_pulls','github_branches','github_create_branch','github_put_file','github_create_pr','task_list','task_get','task_create','task_update','task_step','task_history','audit_view',
 ]);
 
+// 语音、音色列表、联网搜索依赖外部的旧 qq-bridge 项目（不在本仓库里）。
+// 以前写死成作者本机的 ../整理版_2026-10-16/qq-bridge；现在用 THREADLINE_LEGACY_BRIDGE 指定，没配置时给出明确错误。
+function legacyBridgeDir(){
+  const dir=process.env.THREADLINE_LEGACY_BRIDGE;
+  if(!dir||!existsSync(resolve(dir)))throw Object.assign(new Error('voice/web tools need THREADLINE_LEGACY_BRIDGE pointing to a qq-bridge checkout'),{code:'CAPABILITY_NOT_CONFIGURED'});
+  return resolve(dir);
+}
 async function speak(args={}){
-  const legacy=resolve(PROJECT,'../整理版_2026-10-16/qq-bridge');
+  const legacy=legacyBridgeDir();
   const {speechPlan,synthesizeMinimax}=await import(pathToFileURL(join(legacy,'src/companion-life/speech.js')).href);
   const cfg=JSON.parse(readFileSync(join(legacy,'config.json'),'utf8'));
   const style=/^(bright|soft)$/.test(String(args.style??''))?String(args.style):(/亮|轻|活泼|明快/.test(String(args.style??''))?'bright':'soft');
@@ -98,7 +105,7 @@ async function speak(args={}){
   return {...synth,file,delivered:true};
 }
 async function listVoices(args={}){
-  const legacy=resolve(PROJECT,'../整理版_2026-10-16/qq-bridge');
+  const legacy=legacyBridgeDir();
   const {listAudioFiles}=await import(pathToFileURL(join(legacy,'src/voice-core.js')).href);
   return listAudioFiles(join(legacy,'audio')).slice(0,Number(args.limit??30));
 }
@@ -119,7 +126,7 @@ async function brainJson(path,body=null,method='POST'){
   if(!response.ok)throw new Error(value.error??`brain ${response.status}`);
   return value;
 }
-async function webTool(name,toolArgs){  const legacy=resolve(PROJECT,'../整理版_2026-10-16/qq-bridge');
+async function webTool(name,toolArgs){  const legacy=legacyBridgeDir();
   const {Client}=await import(pathToFileURL(join(legacy,'node_modules/@modelcontextprotocol/sdk/dist/esm/client/index.js')).href);
   const {StdioClientTransport}=await import(pathToFileURL(join(legacy,'node_modules/@modelcontextprotocol/sdk/dist/esm/client/stdio.js')).href);
   const transport=new StdioClientTransport({command:process.execPath,args:[join(legacy,'src/mcp-web-search-safe.js')],cwd:legacy,stderr:'pipe'});

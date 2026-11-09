@@ -26,6 +26,12 @@ function manifestAt(dir,expectedName=null){
   if(!Array.isArray(manifest.actions)||manifest.actions.length>32)throw fail('PLUGIN_MANIFEST','actions array required');
   return {dir,entry,name:manifest.name,actions:[...new Set(manifest.actions.filter(a=>typeof a==='string'))],description:String(manifest.description??'').slice(0,500),version:String(manifest.version??'').slice(0,40)};
 }
+// 校验刚克隆下来的插件目录：manifest 名字必须和安装名一致（运行时按目录名找插件），且至少声明一个动作。
+export function validateClonedPlugin(dir,pluginName){
+  const manifest=manifestAt(dir,pluginName);
+  if(!manifest.actions.length)throw fail('PLUGIN_MANIFEST','plugin declares no actions');
+  return manifest;
+}
 function manifestOf(root,name){
   return manifestAt(pluginDir(root,name),name);
 }export function listPlugins({root=null}={}){
@@ -56,10 +62,8 @@ export async function installPlugin({root=null,url,name=null,ref=null}={}){
     const args=['clone','--depth','1',...(ref?['--branch',String(ref)]:[]),raw,tempName];
     const result=await runOffice({root:base,command:'git',args,cwd:'.',timeoutMs:60000});
     if(result.exitCode!==0)throw fail('PLUGIN_CLONE',String(result.stderr||'git clone failed').slice(0,500));
-    const manifest=manifestOf(join(base,'plugins'),pluginName,'');
-    // manifestOf expects plugins root; temp name differs; validate inside temp directly
-    const tempManifest=manifestOf(join(base,'plugins'),tempName,'');
-    if(!tempManifest.actions.length)throw fail('PLUGIN_MANIFEST','plugin declares no actions');
+    // 以前这里用 manifestOf(plugins 目录, …) 校验，内部又拼了一层 plugins，路径永远不存在，安装必然失败。
+    const tempManifest=validateClonedPlugin(temp,pluginName);
     renameSync(temp,dir);
     return {name:pluginName,version:tempManifest.version,description:tempManifest.description,actions:tempManifest.actions,path:'plugins/'+pluginName};
   }catch(error){

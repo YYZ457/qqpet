@@ -25,6 +25,7 @@ function auditTail(limit=50){
 }
 const json=(res,status,value)=>{res.writeHead(status,{'content-type':'application/json'});res.end(JSON.stringify(value));};
 const authorized=req=>!token||req.headers['x-office-token']===token;
+const EXEC_TOOLS=new Set(['office_run','office_npm','office_plugin_run','office_plugin_install']);
 const tools={
   office_status:()=>officeStatus({}),
   office_list:a=>listOffice({path:a.path??'.',max:a.max}),
@@ -49,6 +50,9 @@ const server=createServer(async(req,res)=>{
     const tool=String(input.tool??'');
     const fn=tools[tool];
     if(!fn)return json(res,400,{error:'OFFICE_TOOL',message:'unknown office tool'});
+    // 执行类工具（跑命令、npm、装/跑插件）等于让模型在这台电脑上执行任意代码，而接 QQ 的模型可以被群友的消息诱导。
+    // 默认关闭；确认工作区已经放进容器或虚拟机后，再设 THREADLINE_OFFICE_EXEC=1 打开。
+    if(EXEC_TOOLS.has(tool)&&process.env.THREADLINE_OFFICE_EXEC!=='1')return json(res,403,{error:'OFFICE_EXEC_DISABLED',message:'command execution tools are disabled; set THREADLINE_OFFICE_EXEC=1 after sandboxing the office'});
     if(!input.args||Object.getPrototypeOf(input.args)!==Object.prototype)return json(res,400,{error:'OFFICE_INPUT',message:'args object required'});
     const key=mutating.has(tool)?idemKey(tool,input.idempotencyKey):null;
     if(key&&idempotency[key]){
